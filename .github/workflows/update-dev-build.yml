@@ -1,1481 +1,1256 @@
-name: Update Windows 11 Dev 26340 amd64 UUP Package
+name: Auto Update Windows 11 Experimental Dev Build
 
 on:
+  # 每小时检查一次
   schedule:
-    # 每天 UTC 00:00
-    # 北京/新加坡时间 UTC+8 = 每天 08:00
-    - cron: '0 0 * * *'
+    - cron: '0 * * * *'
 
+  # 允许手动运行
   workflow_dispatch:
+
+# 防止同一时间运行多个更新任务
+concurrency:
+  group: windows11-dev-build-update
+  cancel-in-progress: false
 
 permissions:
   contents: write
-
+  actions: write
 
 env:
 
   # ============================================================
-  # 仓库中的 UUP 下载脚本目录
+  # Microsoft Windows Insider Experimental 主频道
   # ============================================================
 
-  FILE_NAME: Windows11_Insider_Preview_Feature_Update_Dev_amd64
-
-
-  # ============================================================
-  # 第二个 ISO Workflow
-  # ============================================================
-
-  WORKFLOW_FILE: .github/workflows/Windows11_Insider_Preview_Feature_Update_Dev_amd64.yml
-
+  MICROSOFT_EXPERIMENTAL_URL: >-
+    https://learn.microsoft.com/zh-cn/windows-insider/release-notes/experimental/preview-build-26340-9233
 
   # ============================================================
-  # ★★★ 目标 Build ★★★
+  # UUP Dump
+  # ============================================================
+
+  UUP_API: 'https://api.uupdump.net'
+
+  ARCH: 'amd64'
+  RING: 'Dev'
+  FLIGHT: 'Mainline'
+
+  # ============================================================
+  # 只使用简体中文
+  # ============================================================
+
+  LANGUAGE: 'zh-cn'
+
+  # ============================================================
+  # UUP 基础 SKU
   #
-  # 只允许：
-  #
-  # 26340.xxxx
-  #
-  # 绝对不会选择：
-  #
-  # 26350.xxxx
-  # 26400.xxxx
-  # 29648.xxxx
+  # 专业版
   # ============================================================
 
-  TARGET_BUILD_MAJOR: '26340'
-
-
-  # ============================================================
-  # 当前仓库中的起始 Build
-  #
-  # 第一次运行时：
-  #
-  # 26340.9233
-  #
-  # 只有发现：
-  #
-  # 26340.xxxx > 26340.9233
-  #
-  # 才进行更新。
-  # ============================================================
-
-  MIN_BUILD: '26340.9233'
-
+  EDITION: 'professional'
 
   # ============================================================
-  # UUP dump
+  # 目标目录
   # ============================================================
 
-  UUP_API: https://api.uupdump.net
-
-  UUP_SITE: https://uupdump.net
-
+  FILE_NAME: 'Windows11_Insider_Preview_Feature_Update_Dev_amd64'
 
   # ============================================================
-  # ★ 固定语言
-  #
-  # 只下载简体中文
+  # ISO 工作流
   # ============================================================
 
-  LANGUAGE: zh-cn
-
-
-  # ============================================================
-  # ★ 基础 SKU
-  #
-  # 选择 Professional
-  # ============================================================
-
-  EDITION: Professional
+  ISO_WORKFLOW: 'Windows11_Insider_Preview_Feature_Update_Dev_amd64.yml'
 
 
 jobs:
 
   update:
 
-    runs-on: ubuntu-latest
+    name: Detect Experimental Build and Update UUP Package
 
+    runs-on: windows-latest
 
     steps:
 
-
       # ========================================================
-      # 1. Checkout 仓库
+      # 1. 检出仓库
       # ========================================================
 
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GH_PAT }}
 
 
       # ========================================================
-      # 2. 安装工具
-      # ========================================================
-
-      - name: Install required tools
-        shell: bash
-        run: |
-
-          set -e
-
-          sudo apt-get update
-
-          sudo apt-get install -y jq unzip
-
-
-      # ========================================================
-      # 3. 读取当前 Workflow 的 Build_VERSION
+      # 2. 从现有 ISO 工作流读取当前 Build
+      #
+      # 不再写死 26340.9233
+      #
+      # 如果以后：
+      #
+      # 26340.9233
+      # ↓
+      # 26340.9500
+      #
+      # 或：
+      #
+      # 26H2
+      # ↓
+      # 27H2
+      #
+      # 都不需要修改这里
       # ========================================================
 
       - name: Read current Build
-        shell: bash
+        shell: pwsh
         run: |
 
-          set -e
+          $ErrorActionPreference = "Stop"
+
+          $workflow = ".github/workflows/$env:ISO_WORKFLOW"
+
+          if (-not (Test-Path $workflow)) {
+
+              throw "ISO workflow not found: $workflow"
+          }
+
+          $content = Get-Content $workflow -Raw
+
+          $match = [regex]::Match(
+              $content,
+              "Build_VERSION:\s*['""]([^'""]+)['""]"
+          )
+
+          if (-not $match.Success) {
+
+              throw "Build_VERSION was not found in ISO workflow."
+          }
+
+          $currentBuild = $match.Groups[1].Value.Trim()
+
+          if ($currentBuild -notmatch '^\d+\.\d+$') {
+
+              throw "Invalid current Build: $currentBuild"
+          }
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "Current repository Build"
+          Write-Host "=========================================="
+          Write-Host $currentBuild
+          Write-Host ""
+
+          "CURRENT_BUILD=$currentBuild" >> $env:GITHUB_ENV
 
 
-          echo "=========================================="
+      # ========================================================
+      # 3. 读取 Microsoft Experimental 主频道
+      #
+      # 重要：
+      #
+      # 不读取：
+      #
+      # Beta
+      # Experimental (26H1)
+      # Experimental (Future Platforms)
+      #
+      # 只寻找：
+      #
+      # /experimental/preview-build-xxxxx-xxxx
+      #
+      # 这种普通 Experimental 页面
+      # ========================================================
 
-          echo "读取当前 Build"
+      - name: Read Microsoft Experimental sidebar
+        shell: pwsh
+        run: |
 
-          echo "=========================================="
+          $ErrorActionPreference = "Stop"
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "Reading Microsoft Experimental channel"
+          Write-Host "=========================================="
+          Write-Host ""
+
+          $url = $env:MICROSOFT_EXPERIMENTAL_URL
+
+          Write-Host "Source:"
+          Write-Host $url
+          Write-Host ""
+
+          $response = Invoke-WebRequest `
+              -Uri $url `
+              -UseBasicParsing `
+              -Headers @{
+                  "User-Agent" = "Mozilla/5.0"
+                  "Accept" = "text/html,application/xhtml+xml"
+                  "Accept-Language" = "zh-CN,zh;q=0.9"
+              } `
+              -TimeoutSec 60
+
+          $html = $response.Content
+
+          if ([string]::IsNullOrWhiteSpace($html)) {
+
+              throw "Microsoft returned empty HTML."
+          }
+
+          # 保存页面用于调试
+          $html |
+              Out-File `
+                  "microsoft-experimental.html" `
+                  -Encoding utf8
+
+          Write-Host "Microsoft page downloaded."
 
 
-          CURRENT_BUILD=$(
-            grep -oP \
-              "Build_VERSION:\s*['\"]\K[0-9]+\.[0-9]+" \
-              "${WORKFLOW_FILE}" \
-              | head -n 1
+          # ====================================================
+          # 提取普通 Experimental 主频道的 Build 页面
+          #
+          # 只接受：
+          #
+          # /experimental/preview-build-26340-9233
+          #
+          # 而不是：
+          #
+          # /experimental/26h1/...
+          # /experimental/future-platforms/...
+          # ====================================================
+
+          $pattern =
+              'href\s*=\s*["'']([^"'']*/windows-insider/release-notes/experimental/preview-build-(\d+)-(\d+)[^"'']*)["'']'
+
+          $matches = [regex]::Matches(
+              $html,
+              $pattern,
+              [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
           )
 
 
-          if [ -z "$CURRENT_BUILD" ]; then
-
-            echo "ERROR: 找不到 Build_VERSION"
-
-            exit 1
-
-          fi
+          $builds = @()
 
 
-          echo "当前仓库 Build: $CURRENT_BUILD"
+          foreach ($m in $matches) {
+
+              $href = $m.Groups[1].Value
+
+              $major = [int64]$m.Groups[2].Value
+              $minor = [int64]$m.Groups[3].Value
+
+              $build = "$major.$minor"
+
+              $builds += [PSCustomObject]@{
+                  Build = $build
+                  Major = $major
+                  Minor = $minor
+                  Url   = $href
+              }
+          }
 
 
-          echo "CURRENT_BUILD=$CURRENT_BUILD" >> "$GITHUB_ENV"
+          # 去重
+          $builds = $builds |
+              Sort-Object Build -Unique
 
 
-      # ========================================================
-      # 4. 查询 UUP dump
-      #
-      # ★★★ 关键修正 ★★★
-      #
-      # 以前：
-      #
-      # fetchupd.php?arch=amd64&ring=Dev&flight=Mainline
-      #
-      # 会返回当前 Dev 的其他主 Build，
-      # 例如 29648.xxxx。
-      #
-      # 现在：
-      #
-      # 明确指定：
-      #
-      # build=26340
-      #
-      # 所以只寻找 26340 分支。
-      # ========================================================
-
-      - name: Query UUP dump for Build 26340
-        shell: bash
-        run: |
-
-          set -e
+          Write-Host ""
+          Write-Host "Experimental main-channel builds found:"
+          Write-Host ""
 
 
-          echo "=========================================="
+          foreach ($item in $builds) {
 
-          echo "查询 UUP dump"
-
-          echo "=========================================="
-
-
-          API_URL="${UUP_API}/fetchupd.php?arch=amd64&ring=Dev&flight=Mainline&build=${TARGET_BUILD_MAJOR}"
+              Write-Host "$($item.Build)"
+          }
 
 
-          echo ""
+          if ($builds.Count -eq 0) {
 
-          echo "API:"
+              throw @"
+No Experimental main-channel builds were found.
 
-          echo "$API_URL"
+The Microsoft page structure may have changed.
 
-
-          curl \
-            --fail \
-            --retry 5 \
-            --retry-delay 5 \
-            --connect-timeout 30 \
-            --max-time 180 \
-            -L \
-            "$API_URL" \
-            -o latest.json
-
-
-          echo ""
-
-          echo "UUP dump API 返回："
-
-          cat latest.json
-
-
-          echo ""
+This workflow intentionally stops instead of downloading
+Beta / Experimental 26H1 / Experimental Future Platforms.
+"@
+          }
 
 
           # ====================================================
-          # 检查 API error
-          # ====================================================
-
-          if jq -e '.response.error' latest.json >/dev/null 2>&1; then
-
-            echo "ERROR: UUP dump API 返回错误："
-
-            jq '.response.error' latest.json
-
-            exit 1
-
-          fi
-
-
-          # ====================================================
-          # 检查 updateArray
-          # ====================================================
-
-          UPDATE_COUNT=$(
-            jq \
-              '.response.updateArray | length' \
-              latest.json
-          )
-
-
-          echo "API 返回更新数量: $UPDATE_COUNT"
-
-
-          if [ "$UPDATE_COUNT" -eq 0 ]; then
-
-            echo "ERROR: API 没有返回任何更新。"
-
-            exit 1
-
-          fi
-
-
-          # ====================================================
-          # 只提取：
+          # 按 Build 数字排序
           #
-          # 26340.xxxx
+          # 注意：
           #
-          # amd64
+          # 这里不是简单字符串排序
           #
+          # 例如：
+          #
+          # 26340.9233
+          # 27000.1000
+          #
+          # 会正确比较
           # ====================================================
 
-          jq -r --arg major "$TARGET_BUILD_MAJOR" '
-
-            .response.updateArray[]
-
-            |
-
-            select(.arch == "amd64")
-
-            |
-
-            select(
-              (.foundBuild | test("^" + $major + "\\.[0-9]+$"))
-            )
-
-            |
-
-            [
-              .foundBuild,
-              .updateId,
-              (.updateTitle // "")
-            ]
-
-            |
-
-            @tsv
-
-          ' latest.json > builds.tsv
+          $target =
+              $builds |
+              Sort-Object `
+                  @{Expression = "Major"; Descending = $true},
+                  @{Expression = "Minor"; Descending = $true} |
+              Select-Object -First 1
 
 
-          echo ""
-
-          echo "=========================================="
-
-          echo "26340 候选版本"
-
-          echo "=========================================="
-
-
-          if [ ! -s builds.tsv ]; then
-
-            echo "ERROR: 没有找到 26340.xxxx"
-
-            exit 1
-
-          fi
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "Latest Experimental Build"
+          Write-Host "=========================================="
+          Write-Host "Build : $($target.Build)"
+          Write-Host "URL   : $($target.Url)"
+          Write-Host ""
 
 
-          cat builds.tsv
+          "TARGET_BUILD=$($target.Build)" >> $env:GITHUB_ENV
+
+          "TARGET_BUILD_URL=$($target.Url)" >> $env:GITHUB_ENV
 
 
       # ========================================================
-      # 5. 选择最新的 26340.xxxx
-      #
-      # 注意：
-      #
-      # 这里只比较 26340 后面的 Revision。
-      #
-      # 绝不会把 29648 当成候选。
-      # ========================================================
-
-      - name: Select latest 26340 Build
-        shell: bash
-        run: |
-
-          set -e
-
-
-          echo "=========================================="
-
-          echo "选择最新 26340.xxxx"
-
-          echo "=========================================="
-
-
-          LATEST_LINE=$(
-            sort \
-              -t. \
-              -k1,1n \
-              -k2,2n \
-              builds.tsv \
-              | tail -n 1
-          )
-
-
-          LATEST_BUILD=$(echo "$LATEST_LINE" | cut -f1)
-
-          UPDATE_ID=$(echo "$LATEST_LINE" | cut -f2)
-
-          UPDATE_TITLE=$(echo "$LATEST_LINE" | cut -f3-)
-
-
-          echo ""
-
-          echo "最新候选 Build : $LATEST_BUILD"
-
-          echo "Update ID       : $UPDATE_ID"
-
-          echo "Title            : $UPDATE_TITLE"
-
-
-          # ====================================================
-          # 强制验证主 Build
-          # ====================================================
-
-          if ! [[ "$LATEST_BUILD" =~ ^26340\.[0-9]+$ ]]; then
-
-            echo "ERROR: 选出的 Build 不是 26340.xxxx"
-
-            echo "$LATEST_BUILD"
-
-            exit 1
-
-          fi
-
-
-          echo "LATEST_BUILD=$LATEST_BUILD" >> "$GITHUB_ENV"
-
-          echo "UPDATE_ID=$UPDATE_ID" >> "$GITHUB_ENV"
-
-          echo "UPDATE_TITLE=$UPDATE_TITLE" >> "$GITHUB_ENV"
-
-
-      # ========================================================
-      # 6. 比较当前版本
-      #
-      # 只比较：
-      #
-      # 26340.9233
-      #
-      # 与：
-      #
-      # 26340.xxxx
+      # 4. 比较当前 Build
       # ========================================================
 
       - name: Compare Build
-        shell: bash
+        shell: pwsh
         run: |
 
-          set -e
+          $ErrorActionPreference = "Stop"
+
+          $current = [version]$env:CURRENT_BUILD
+          $target  = [version]$env:TARGET_BUILD
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "Build comparison"
+          Write-Host "=========================================="
+
+          Write-Host "Current: $current"
+          Write-Host "Target : $target"
+          Write-Host ""
 
 
-          echo "=========================================="
+          if ($target -le $current) {
 
-          echo "比较 Build"
+              Write-Host "No update."
 
-          echo "=========================================="
+              "UPDATE_AVAILABLE=false" >> $env:GITHUB_ENV
 
-
-          python3 <<'PY'
-
-          import os
-          import sys
+              exit 0
+          }
 
 
-          current = os.environ["CURRENT_BUILD"]
+          Write-Host ""
+          Write-Host "NEW BUILD FOUND"
+          Write-Host ""
+          Write-Host "Old: $current"
+          Write-Host "New: $target"
+          Write-Host ""
 
-          latest = os.environ["LATEST_BUILD"]
-
-          minimum = os.environ["MIN_BUILD"]
-
-          target_major = os.environ["TARGET_BUILD_MAJOR"]
-
-
-          def parse_build(value):
-
-              parts = value.split(".")
-
-              if len(parts) != 2:
-
-                  raise ValueError(
-                      f"Invalid Build: {value}"
-                  )
-
-              return (
-                  int(parts[0]),
-                  int(parts[1])
-              )
-
-
-          current_major, current_minor = parse_build(
-              current
-          )
-
-          latest_major, latest_minor = parse_build(
-              latest
-          )
-
-          minimum_major, minimum_minor = parse_build(
-              minimum
-          )
-
-
-          print(
-              f"Current Build : {current}"
-          )
-
-          print(
-              f"Latest Build  : {latest}"
-          )
-
-          print(
-              f"Minimum Build : {minimum}"
-          )
-
-          print(
-              f"Target Major  : {target_major}"
-          )
-
-
-          # ====================================================
-          # 必须是 26340
-          # ====================================================
-
-          if latest_major != int(target_major):
-
-              print(
-                  "ERROR: 最新版本主 Build 不等于目标 Build。"
-              )
-
-              sys.exit(1)
-
-
-          # ====================================================
-          # 当前版本也必须是 26340
-          # ====================================================
-
-          if current_major != int(target_major):
-
-              print(
-                  "ERROR: 仓库当前 Build 不是目标 26340。"
-              )
-
-              sys.exit(1)
-
-
-          # ====================================================
-          # 比较完整版本
-          # ====================================================
-
-          current_version = (
-              current_major,
-              current_minor
-          )
-
-          latest_version = (
-              latest_major,
-              latest_minor
-          )
-
-          minimum_version = (
-              minimum_major,
-              minimum_minor
-          )
-
-
-          # ====================================================
-          # 最新版本不能低于 MIN_BUILD
-          # ====================================================
-
-          if latest_version < minimum_version:
-
-              print(
-                  "ERROR: UUP dump 返回版本低于 MIN_BUILD。"
-              )
-
-              sys.exit(1)
-
-
-          # ====================================================
-          # 没有更新
-          # ====================================================
-
-          if latest_version <= current_version:
-
-              print(
-                  "没有发现新的 26340 Build。"
-              )
-
-              update = "false"
-
-
-          else:
-
-              print(
-                  "发现新的 26340 Build！"
-              )
-
-              update = "true"
-
-
-          with open(
-              os.environ["GITHUB_ENV"],
-              "a"
-          ) as f:
-
-              f.write(
-                  f"UPDATE_NEEDED={update}\n"
-              )
-
-          PY
+          "UPDATE_AVAILABLE=true" >> $env:GITHUB_ENV
 
 
       # ========================================================
-      # 7. 没有更新
+      # 5. UUP API 精确验证
+      #
+      # 不让 UUP API 自己猜最新版本
+      #
+      # 而是：
+      #
+      # Microsoft Experimental
+      #        ↓
+      # TARGET_BUILD
+      #        ↓
+      # UUP API 精确查询
       # ========================================================
 
-      - name: No update
-        if: env.UPDATE_NEEDED == 'false'
-        shell: bash
+      - name: Verify exact Build with UUP API
+        if: env.UPDATE_AVAILABLE == 'true'
+        shell: pwsh
         run: |
 
-          echo "=========================================="
+          $ErrorActionPreference = "Stop"
 
-          echo "没有新的 26340 Build"
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "Query UUP Dump API"
+          Write-Host "=========================================="
 
-          echo "=========================================="
+          $build = $env:TARGET_BUILD
 
-          echo "当前: $CURRENT_BUILD"
+          $uri =
+              "$env:UUP_API/fetchupd.php" +
+              "?arch=$env:ARCH" +
+              "&ring=$env:RING" +
+              "&flight=$env:FLIGHT" +
+              "&build=$build"
 
-          echo "UUP : $LATEST_BUILD"
+          Write-Host "Build:"
+          Write-Host $build
+
+          Write-Host ""
+          Write-Host "UUP API:"
+          Write-Host $uri
+          Write-Host ""
+
+
+          $response = Invoke-RestMethod `
+              -Uri $uri `
+              -Method Get `
+              -TimeoutSec 120
+
+
+          $response |
+              ConvertTo-Json -Depth 50 |
+              Out-File `
+                  "uup-response.json" `
+                  -Encoding utf8
+
+
+          Write-Host ""
+          Write-Host "UUP API response:"
+          $response |
+              ConvertTo-Json -Depth 20
+
+
+          # ====================================================
+          # 找到 updateArray
+          # ====================================================
+
+          $updates = $null
+
+
+          if ($null -ne $response.response.updateArray) {
+
+              $updates = @($response.response.updateArray)
+          }
+          elseif ($null -ne $response.response.updates) {
+
+              $updates = @($response.response.updates)
+          }
+          elseif ($null -ne $response.response.updateInfo) {
+
+              $updates = @($response.response.updateInfo)
+          }
+
+
+          if ($null -eq $updates -or $updates.Count -eq 0) {
+
+              throw "UUP API returned no update information."
+          }
+
+
+          # ====================================================
+          # 找精确 Build
+          # ====================================================
+
+          $matched = @()
+
+
+          foreach ($item in $updates) {
+
+              $json =
+                  $item |
+                  ConvertTo-Json -Depth 30
+
+              $itemBuild = $null
+
+              foreach ($property in @(
+                  "foundBuild",
+                  "build",
+                  "updateBuild"
+              )) {
+
+                  if ($item.PSObject.Properties.Name -contains $property) {
+
+                      $itemBuild =
+                          [string]$item.$property
+
+                      break
+                  }
+              }
+
+
+              if ($itemBuild -eq $build) {
+
+                  $matched += $item
+              }
+          }
+
+
+          if ($matched.Count -eq 0) {
+
+              throw @"
+UUP API did not return the exact requested Build.
+
+Requested:
+$build
+
+This workflow will NOT download another Build.
+"@
+          }
+
+
+          # ====================================================
+          # 获取 Update ID
+          # ====================================================
+
+          $updateId = $null
+
+
+          foreach ($item in $matched) {
+
+              foreach ($property in @(
+                  "updateId",
+                  "uuid",
+                  "id"
+              )) {
+
+                  if ($item.PSObject.Properties.Name -contains $property) {
+
+                      $candidate =
+                          [string]$item.$property
+
+                      if ($candidate -match '^[0-9a-fA-F-]{36}') {
+
+                          $updateId = $candidate
+
+                          break
+                      }
+                  }
+              }
+
+              if ($updateId) {
+                  break
+              }
+          }
+
+
+          if (-not $updateId) {
+
+              throw "Exact Build was found, but Update ID was not returned."
+          }
+
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "UUP Build verified"
+          Write-Host "=========================================="
+          Write-Host "Build:"
+          Write-Host $build
+          Write-Host ""
+          Write-Host "Update ID:"
+          Write-Host $updateId
+          Write-Host ""
+
+
+          "UUP_UPDATE_ID=$updateId" >> $env:GITHUB_ENV
 
 
       # ========================================================
-      # 8. 创建临时目录
+      # 6. 准备临时目录
       # ========================================================
 
       - name: Prepare temporary directory
-        if: env.UPDATE_NEEDED == 'true'
-        shell: bash
+        if: env.UPDATE_AVAILABLE == 'true'
+        shell: pwsh
         run: |
 
-          set -e
+          $ErrorActionPreference = "Stop"
 
+          if (Test-Path "_uup_update") {
 
-          rm -rf new_package
+              Remove-Item `
+                  "_uup_update" `
+                  -Recurse `
+                  -Force
+          }
 
-          rm -rf extracted_package
-
-
-          mkdir -p new_package
-
-          mkdir -p extracted_package
+          New-Item `
+              -ItemType Directory `
+              -Path "_uup_update" |
+              Out-Null
 
 
       # ========================================================
-      # 9. 下载 UUP dump Conversion Package
+      # 7. 下载 UUP 转换包
       #
-      # ★★★ 重要 ★★★
+      # 这里严格按照你的配置：
       #
-      # 这不是下载几十 GB UUP。
-      #
-      # 这里下载的是 UUP dump 生成的脚本包 ZIP。
-      #
-      # autodl=3：
-      #
-      # Download + Convert + Virtual Editions
-      #
-      # updates=1：
+      # Windows 专业版
+      # zh-cn
+      # 下载并转换 ISO
       # 包括更新
-      #
-      # cleanup=1：
       # 运行组件清理
-      #
-      # netfx=1：
       # 集成 .NET 3.5
+      # 固实压缩
+      # 虚拟版本全部
       #
-      # esd=1：
-      # ESD / 固实压缩
-      #
-      # virtualEditions：
-      # 你要求的全部 Virtual Editions
+      # autodl=3 = 下载 + 转换 + 虚拟版本
       # ========================================================
 
       - name: Download UUP conversion package
-        if: env.UPDATE_NEEDED == 'true'
-        shell: bash
+        if: env.UPDATE_AVAILABLE == 'true'
+        shell: pwsh
         run: |
 
-          set -e
+          $ErrorActionPreference = "Stop"
 
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "Download UUP conversion package"
+          Write-Host "=========================================="
 
-          echo "=========================================="
+          Write-Host "Build:"
+          Write-Host $env:TARGET_BUILD
 
-          echo "下载 UUP dump 转换脚本包"
-
-          echo "=========================================="
-
-
-          DOWNLOAD_URL="${UUP_SITE}/get.php?id=${UPDATE_ID}&pack=${LANGUAGE}&edition=${EDITION}&aria2=2&autodl=3"
-
-
-          echo ""
-
-          echo "Build:"
-
-          echo "$LATEST_BUILD"
-
-
-          echo ""
-
-          echo "Language:"
-
-          echo "$LANGUAGE"
-
-
-          echo ""
-
-          echo "Edition:"
-
-          echo "$EDITION"
-
-
-          echo ""
-
-          echo "Download URL:"
-
-          echo "$DOWNLOAD_URL"
+          Write-Host ""
+          Write-Host "Update ID:"
+          Write-Host $env:UUP_UPDATE_ID
 
 
           # ====================================================
-          # POST：
-          #
-          # autodl=3
-          # updates=1
-          # cleanup=1
-          # netfx=1
-          # esd=1
-          #
-          # Virtual Editions
+          # UUP Dump package URL
           # ====================================================
 
-          curl \
-            --fail \
-            --retry 5 \
-            --retry-delay 5 \
-            --connect-timeout 30 \
-            --max-time 300 \
-            -L \
-            -X POST \
-            "$DOWNLOAD_URL" \
-            --data-urlencode "updates=1" \
-            --data-urlencode "cleanup=1" \
-            --data-urlencode "netfx=1" \
-            --data-urlencode "esd=1" \
-            --data-urlencode "virtualEditions[]=ProfessionalWorkstation" \
-            --data-urlencode "virtualEditions[]=ProfessionalEducation" \
-            --data-urlencode "virtualEditions[]=Education" \
-            --data-urlencode "virtualEditions[]=Enterprise" \
-            --data-urlencode "virtualEditions[]=ServerRdsh" \
-            --data-urlencode "virtualEditions[]=IoTEnterprise" \
-            --data-urlencode "virtualEditions[]=IoTEnterpriseSubscription" \
-            -o uup_package.zip
+          $packageUrl =
+              "https://uupdump.net/get.php" +
+              "?id=$env:UUP_UPDATE_ID" +
+              "&pack=$env:LANGUAGE" +
+              "&edition=$env:EDITION"
 
 
-          echo ""
-
-          echo "下载完成："
-
-          ls -lh uup_package.zip
+          Write-Host ""
+          Write-Host "Package URL:"
+          Write-Host $packageUrl
 
 
-      # ========================================================
-      # 10. 验证 ZIP
-      # ========================================================
+          # ====================================================
+          # 虚拟版本
+          #
+          # 你的要求：
+          #
+          # 专业工作站版
+          # 专业教育版
+          # 教育版
+          # 企业版
+          # 企业版多会话/虚拟桌面
+          # IoT 企业版
+          # IoT 企业版订阅
+          #
+          # ====================================================
 
-      - name: Verify UUP package
-        if: env.UPDATE_NEEDED == 'true'
-        shell: bash
-        run: |
-
-          set -e
-
-
-          echo "=========================================="
-
-          echo "验证 UUP 下载包"
-
-          echo "=========================================="
-
-
-          if [ ! -f uup_package.zip ]; then
-
-            echo "ERROR: uup_package.zip 不存在。"
-
-            exit 1
-
-          fi
-
-
-          FILE_SIZE=$(
-            stat \
-              -c%s \
-              uup_package.zip
+          $virtualEditions = @(
+              "ProfessionalWorkstation",
+              "ProfessionalEducation",
+              "Education",
+              "Enterprise",
+              "EnterpriseS",
+              "IoTEnterprise",
+              "IoTEnterpriseSubscription"
           )
 
 
-          echo "ZIP 大小: $FILE_SIZE bytes"
+          # ====================================================
+          # 构造 application/x-www-form-urlencoded
+          #
+          # virtualEditions[] 必须重复发送
+          # ====================================================
+
+          $formParts = @()
+
+          $formParts += "autodl=3"
+          $formParts += "updates=1"
+          $formParts += "cleanup=1"
+          $formParts += "netfx=1"
+
+          # 使用固实压缩
+          $formParts += "esd=1"
 
 
-          if [ "$FILE_SIZE" -lt 1000 ]; then
+          foreach ($edition in $virtualEditions) {
 
-            echo "ERROR: ZIP 文件异常过小。"
+              $encoded =
+                  [System.Uri]::EscapeDataString($edition)
 
-            exit 1
+              $formParts +=
+                  "virtualEditions%5B%5D=$encoded"
+          }
 
-          fi
+
+          $body =
+              $formParts -join "&"
 
 
-          echo ""
+          Write-Host ""
+          Write-Host "UUP conversion options:"
+          Write-Host "  Language : $env:LANGUAGE"
+          Write-Host "  Edition  : $env:EDITION"
+          Write-Host "  Updates  : YES"
+          Write-Host "  Cleanup  : YES"
+          Write-Host "  NetFx3   : YES"
+          Write-Host "  Solid    : YES"
+          Write-Host "  Virtual  : ALL"
+          Write-Host ""
 
-          echo "ZIP 内容："
 
-          unzip -l uup_package.zip
+          $zipPath =
+              Join-Path `
+                  $PWD `
+                  "_uup_update\uup_package.zip"
+
+
+          $downloaded = $false
 
 
           # ====================================================
-          # 必须存在转换脚本
+          # 自动重试
           # ====================================================
 
-          unzip -l uup_package.zip \
-            | grep -q \
-              "uup_download_windows.cmd"
+          for ($attempt = 1; $attempt -le 5; $attempt++) {
+
+              try {
+
+                  Write-Host ""
+                  Write-Host "Download attempt $attempt / 5"
+
+
+                  Invoke-WebRequest `
+                      -Uri $packageUrl `
+                      -Method Post `
+                      -ContentType "application/x-www-form-urlencoded" `
+                      -Body $body `
+                      -OutFile $zipPath `
+                      -TimeoutSec 300
+
+
+                  if (
+                      (Test-Path $zipPath) -and
+                      ((Get-Item $zipPath).Length -gt 1000)
+                  ) {
+
+                      $downloaded = $true
+
+                      break
+                  }
+
+              }
+              catch {
+
+                  Write-Host ""
+                  Write-Host "Download failed:"
+                  Write-Host $_
+              }
+
+
+              Start-Sleep -Seconds 15
+          }
+
+
+          if (-not $downloaded) {
+
+              throw "Failed to download UUP conversion package after 5 attempts."
+          }
+
+
+          Write-Host ""
+          Write-Host "UUP conversion package downloaded."
+
+
+      # ========================================================
+      # 8. 解压 UUP 包
+      # ========================================================
+
+      - name: Extract UUP conversion package
+        if: env.UPDATE_AVAILABLE == 'true'
+        shell: pwsh
+        run: |
+
+          $ErrorActionPreference = "Stop"
+
+          $zip =
+              "_uup_update\uup_package.zip"
+
+          $extract =
+              "_uup_update\extracted"
+
+
+          if (Test-Path $extract) {
+
+              Remove-Item `
+                  $extract `
+                  -Recurse `
+                  -Force
+          }
+
+
+          New-Item `
+              -ItemType Directory `
+              -Path $extract |
+              Out-Null
+
+
+          Expand-Archive `
+              -Path $zip `
+              -DestinationPath $extract `
+              -Force
+
+
+          Write-Host ""
+          Write-Host "Extracted package:"
+
+
+          Get-ChildItem `
+              $extract `
+              -Recurse `
+              -File |
+              Select-Object FullName, Length
+
+
+      # ========================================================
+      # 9. 找到真正的 UUP 根目录
+      # ========================================================
+
+      - name: Normalize UUP package
+        if: env.UPDATE_AVAILABLE == 'true'
+        shell: pwsh
+        run: |
+
+          $ErrorActionPreference = "Stop"
+
+          $root =
+              "_uup_update\extracted"
 
 
           # ====================================================
-          # 必须存在转换配置
+          # 找 uup_download_windows.cmd
           # ====================================================
 
-          unzip -l uup_package.zip \
-            | grep -q \
+          $cmd =
+              Get-ChildItem `
+                  $root `
+                  -Recurse `
+                  -Filter "uup_download_windows.cmd" |
+              Select-Object -First 1
+
+
+          if (-not $cmd) {
+
+              throw @"
+uup_download_windows.cmd was not found.
+
+The downloaded UUP package may be invalid.
+"@
+          }
+
+
+          $source =
+              $cmd.Directory.FullName
+
+
+          Write-Host ""
+          Write-Host "UUP package root:"
+          Write-Host $source
+
+
+          # ====================================================
+          # 验证必要文件
+          # ====================================================
+
+          $required = @(
+              "uup_download_windows.cmd",
               "ConvertConfig.ini"
-
-
-          # ====================================================
-          # 必须存在 files
-          # ====================================================
-
-          unzip -l uup_package.zip \
-            | grep -q \
-              "files/"
-
-
-          echo ""
-
-          echo "UUP 下载包验证成功。"
-
-
-      # ========================================================
-      # 11. 解压
-      # ========================================================
-
-      - name: Extract UUP package
-        if: env.UPDATE_NEEDED == 'true'
-        shell: bash
-        run: |
-
-          set -e
-
-
-          unzip \
-            -q \
-            uup_package.zip \
-            -d extracted_package
-
-
-          echo ""
-
-          echo "解压完成："
-
-          find \
-            extracted_package \
-            -maxdepth 3 \
-            -type f \
-            | sort
-
-
-      # ========================================================
-      # 12. 找到实际 Package Root
-      # ========================================================
-
-      - name: Normalize package structure
-        if: env.UPDATE_NEEDED == 'true'
-        shell: bash
-        run: |
-
-          set -e
-
-
-          echo "=========================================="
-
-          echo "整理 UUP Package"
-
-          echo "=========================================="
-
-
-          CMD_FILE=$(
-            find \
-              extracted_package \
-              -type f \
-              -name "uup_download_windows.cmd" \
-              | head -n 1
           )
 
 
-          if [ -z "$CMD_FILE" ]; then
+          foreach ($file in $required) {
 
-            echo "ERROR: 找不到 uup_download_windows.cmd"
+              if (-not (Test-Path (Join-Path $source $file))) {
 
-            exit 1
-
-          fi
-
-
-          PACKAGE_ROOT=$(
-            dirname "$CMD_FILE"
-          )
+                  throw "Required file missing: $file"
+              }
+          }
 
 
-          echo "Package Root:"
+          # ====================================================
+          # 保存真正的 UUP 根目录
+          # ====================================================
 
-          echo "$PACKAGE_ROOT"
-
-
-          cp -a \
-            "$PACKAGE_ROOT"/. \
-            new_package/
+          "UUP_SOURCE=$source" >> $env:GITHUB_ENV
 
 
       # ========================================================
-      # 13. 验证完整 Package
+      # 10. 验证 UUP 包配置
       # ========================================================
 
-      - name: Verify complete package
-        if: env.UPDATE_NEEDED == 'true'
-        shell: bash
+      - name: Verify UUP package configuration
+        if: env.UPDATE_AVAILABLE == 'true'
+        shell: pwsh
         run: |
 
-          set -e
+          $ErrorActionPreference = "Stop"
+
+          $source = $env:UUP_SOURCE
 
 
-          echo "=========================================="
-
-          echo "验证完整 Package"
-
-          echo "=========================================="
-
-
-          test \
-            -f \
-            new_package/uup_download_windows.cmd
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "Verify UUP package configuration"
+          Write-Host "=========================================="
+          Write-Host ""
 
 
-          test \
-            -f \
-            new_package/ConvertConfig.ini
+          $config =
+              Get-Content `
+                  (Join-Path $source "ConvertConfig.ini") `
+                  -Raw
 
 
-          test \
-            -d \
-            new_package/files
+          Write-Host $config
 
 
-          FILE_COUNT=$(
-            find \
-              new_package \
-              -type f \
-              | wc -l
-          )
+          # ====================================================
+          # 检查：
+          #
+          # 更新
+          # 清理
+          # NetFx3
+          # 固实压缩
+          # 虚拟版本
+          # ====================================================
+
+          foreach ($check in @(
+              "AddUpdates",
+              "Cleanup",
+              "NetFx3",
+              "wim2esd",
+              "StartVirtual"
+          )) {
+
+              if (
+                  $config `
+                  -notmatch "(?im)^\s*$check\s*="
+              ) {
+
+                  Write-Host "WARNING: $check not found."
+              }
+          }
 
 
-          echo "文件总数: $FILE_COUNT"
-
-
-          if [ "$FILE_COUNT" -lt 5 ]; then
-
-            echo "ERROR: 文件数量异常。"
-
-            exit 1
-
-          fi
-
-
-          echo ""
-
-          echo "Package 结构正常。"
+          Write-Host ""
+          Write-Host "UUP package verification completed."
 
 
       # ========================================================
-      # 14. 验证 ConvertConfig.ini
+      # 11. 完整替换整个目录
       #
-      # UUP dump 的 Conversion Package 会把这些选项
-      # 写入 ConvertConfig.ini。
+      # 旧目录：
       #
-      # autodl=3 对应 Virtual Editions。
-      # ========================================================
-
-      - name: Verify conversion configuration
-        if: env.UPDATE_NEEDED == 'true'
-        shell: bash
-        run: |
-
-          set -e
-
-
-          CONFIG="new_package/ConvertConfig.ini"
-
-
-          echo "=========================================="
-
-          echo "ConvertConfig.ini"
-
-          echo "=========================================="
-
-
-          cat "$CONFIG"
-
-
-          echo ""
-
-
-          # ====================================================
-          # 包括更新
-          # ====================================================
-
-          grep -Eq \
-            '^AddUpdates[[:space:]]*=[[:space:]]*1' \
-            "$CONFIG"
-
-
-          # ====================================================
-          # 组件清理
-          # ====================================================
-
-          grep -Eq \
-            '^Cleanup[[:space:]]*=[[:space:]]*1' \
-            "$CONFIG"
-
-
-          # ====================================================
-          # .NET 3.5
-          # ====================================================
-
-          grep -Eq \
-            '^NetFx3[[:space:]]*=[[:space:]]*1' \
-            "$CONFIG"
-
-
-          # ====================================================
-          # ESD
-          # ====================================================
-
-          grep -Eq \
-            '^wim2esd[[:space:]]*=[[:space:]]*1' \
-            "$CONFIG"
-
-
-          # ====================================================
-          # Virtual Editions
-          # ====================================================
-
-          grep -Eq \
-            '^StartVirtual[[:space:]]*=[[:space:]]*1' \
-            "$CONFIG"
-
-
-          echo ""
-
-          echo "转换配置验证成功。"
-
-
-      # ========================================================
-      # 15. 验证 Virtual Editions
-      # ========================================================
-
-      - name: Verify Virtual Editions
-        if: env.UPDATE_NEEDED == 'true'
-        shell: bash
-        run: |
-
-          set -e
-
-
-          CONFIG="new_package/ConvertConfig.ini"
-
-
-          echo "=========================================="
-
-          echo "验证 Virtual Editions"
-
-          echo "=========================================="
-
-
-          for EDITION_NAME in \
-            ProfessionalWorkstation \
-            ProfessionalEducation \
-            Education \
-            Enterprise \
-            ServerRdsh \
-            IoTEnterprise \
-            IoTEnterpriseSubscription
-
-          do
-
-            echo "检查：$EDITION_NAME"
-
-
-            grep -q \
-              "$EDITION_NAME" \
-              "$CONFIG"
-
-          done
-
-
-          echo ""
-
-          echo "7 个 Virtual Editions 全部存在。"
-
-
-      # ========================================================
-      # 16. 整体替换旧目录
+      # Windows11_Insider_Preview_Feature_Update_Dev_amd64
       #
-      # ★★★ 非常重要 ★★★
-      #
-      # 整个目录删除。
+      # 全部删除
       #
       # 包括：
       #
-      # files/
+      # file\
+      # *.cmd
+      # *.bat
+      # *.ini
+      # *.txt
+      # *.7z
+      # 其他所有文件
       #
-      # 旧文件全部删除。
+      # 然后使用新的 UUP 包完整替换
       # ========================================================
 
       - name: Replace entire UUP directory
-        if: env.UPDATE_NEEDED == 'true'
-        shell: bash
+        if: env.UPDATE_AVAILABLE == 'true'
+        shell: pwsh
         run: |
 
-          set -e
+          $ErrorActionPreference = "Stop"
+
+          $source = $env:UUP_SOURCE
+          $target = $env:FILE_NAME
 
 
-          echo "=========================================="
-
-          echo "整体替换 UUP 文件夹"
-
-          echo "=========================================="
-
-
-          echo ""
-
-          echo "删除旧目录："
-
-          echo "$FILE_NAME"
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "Replace entire UUP directory"
+          Write-Host "=========================================="
 
 
-          rm -rf \
-            "$FILE_NAME"
+          # ====================================================
+          # 删除整个旧目录
+          # ====================================================
+
+          if (Test-Path $target) {
+
+              Write-Host "Removing old directory..."
+
+              Remove-Item `
+                  $target `
+                  -Recurse `
+                  -Force
+          }
 
 
-          mkdir -p \
-            "$FILE_NAME"
+          # ====================================================
+          # 创建新目录
+          # ====================================================
+
+          New-Item `
+              -ItemType Directory `
+              -Path $target |
+              Out-Null
 
 
-          echo ""
+          # ====================================================
+          # 完整复制
+          # ====================================================
 
-          echo "复制新 Package："
+          Copy-Item `
+              "$source\*" `
+              "$target\" `
+              -Recurse `
+              -Force
 
 
-          cp -a \
-            new_package/. \
-            "$FILE_NAME/"
+          Write-Host ""
+          Write-Host "Directory replacement completed."
 
 
-          echo ""
+          Write-Host ""
+          Write-Host "New directory:"
+          Write-Host ""
 
-          echo "新目录内容："
 
-          find \
-            "$FILE_NAME" \
-            -type f \
-            | sort
+          Get-ChildItem `
+              $target `
+              -Recurse `
+              -File |
+              Select-Object FullName, Length
 
 
       # ========================================================
-      # 17. 修改 Build_VERSION
+      # 12. 修改 ISO 工作流 Build_VERSION
+      #
+      # 只修改：
+      #
+      # Build_VERSION
+      #
+      # 不进行危险的全目录数字替换
+      #
+      # 因为 UUP 新下载包本身已经包含正确 Build
       # ========================================================
 
-      - name: Update Build_VERSION
-        if: env.UPDATE_NEEDED == 'true'
-        shell: bash
+      - name: Update ISO workflow Build_VERSION
+        if: env.UPDATE_AVAILABLE == 'true'
+        shell: pwsh
         run: |
 
-          set -e
+          $ErrorActionPreference = "Stop"
+
+          $workflow =
+              ".github/workflows/$env:ISO_WORKFLOW"
 
 
-          echo "=========================================="
+          if (-not (Test-Path $workflow)) {
 
-          echo "修改 Build_VERSION"
-
-          echo "=========================================="
-
-
-          python3 <<'PY'
-
-          import os
-          import re
+              throw "ISO workflow not found: $workflow"
+          }
 
 
-          path = os.environ["WORKFLOW_FILE"]
-
-          new_build = os.environ["LATEST_BUILD"]
-
-
-          with open(
-              path,
-              "r",
-              encoding="utf-8"
-          ) as f:
-
-              text = f.read()
+          $content =
+              Get-Content `
+                  $workflow `
+                  -Raw
 
 
-          pattern = (
-              r"(Build_VERSION:\s*)"
-              r"['\"]"
-              r"[0-9]+\.[0-9]+"
-              r"['\"]"
-          )
-
-
-          new_text, count = re.subn(
-              pattern,
-              rf"\g<1>'{new_build}'",
-              text,
-              count=1
-          )
-
-
-          if count != 1:
-
-              raise SystemExit(
-                  "ERROR: Build_VERSION "
-                  "没有找到或找到次数不正确。"
+          $newContent =
+              [regex]::Replace(
+                  $content,
+                  "(Build_VERSION:\s*)['""][^'""]+['""]",
+                  "`$1'$env:TARGET_BUILD'"
               )
 
 
-          with open(
-              path,
-              "w",
-              encoding="utf-8",
-              newline="\n"
-          ) as f:
+          if ($newContent -eq $content) {
 
-              f.write(new_text)
+              throw "Build_VERSION was not changed."
+          }
 
 
-          print(
-              f"Build_VERSION 已修改为: {new_build}"
-          )
+          Set-Content `
+              -Path $workflow `
+              -Value $newContent `
+              -Encoding UTF8
 
-          PY
+
+          Write-Host ""
+          Write-Host "ISO workflow Build_VERSION updated:"
+          Write-Host $env:TARGET_BUILD
 
 
       # ========================================================
-      # 18. 最终安全检查
+      # 13. 保存 Build 信息
       # ========================================================
 
-      - name: Final verification
-        if: env.UPDATE_NEEDED == 'true'
-        shell: bash
+      - name: Create update information
+        if: env.UPDATE_AVAILABLE == 'true'
+        shell: pwsh
         run: |
 
-          set -e
+          $info = [ordered]@{
+
+              Channel = "Experimental"
+
+              Ring = "Dev"
+
+              Flight = "Mainline"
+
+              Architecture = "amd64"
+
+              Language = "zh-cn"
+
+              Edition = "professional"
+
+              Build = $env:TARGET_BUILD
+
+              PreviousBuild = $env:CURRENT_BUILD
+
+              MicrosoftReleaseNotes = $env:TARGET_BUILD_URL
+
+              UUPUpdateID = $env:UUP_UPDATE_ID
+
+              UpdatedAt = (Get-Date).ToUniversalTime().ToString("o")
+          }
 
 
-          echo "=========================================="
-
-          echo "最终检查"
-
-          echo "=========================================="
-
-
-          # ====================================================
-          # 检查 Build 必须仍然是 26340.xxxx
-          # ====================================================
-
-          if ! [[ "$LATEST_BUILD" =~ ^26340\.[0-9]+$ ]]; then
-
-            echo "ERROR: Build 不符合 26340.xxxx"
-
-            exit 1
-
-          fi
+          $info |
+              ConvertTo-Json -Depth 10 |
+              Out-File `
+                  "dev-build-info.json" `
+                  -Encoding utf8
 
 
-          # ====================================================
-          # 检查目录
-          # ====================================================
-
-          test \
-            -f \
-            "$FILE_NAME/uup_download_windows.cmd"
-
-
-          test \
-            -f \
-            "$FILE_NAME/ConvertConfig.ini"
-
-
-          test \
-            -d \
-            "$FILE_NAME/files"
-
-
-          # ====================================================
-          # 检查 Workflow Build
-          # ====================================================
-
-          echo ""
-
-          grep \
-            "Build_VERSION:" \
-            "$WORKFLOW_FILE"
-
-
-          # ====================================================
-          # 确认没有错误的 29648
-          # ====================================================
-
-          if grep -q \
-            "29648" \
-            "$WORKFLOW_FILE"; then
-
-            echo "ERROR: Workflow 中发现 29648"
-
-            exit 1
-
-          fi
-
-
-          echo ""
-
-          echo "最终检查成功。"
+          Write-Host ""
+          Get-Content "dev-build-info.json"
 
 
       # ========================================================
-      # 19. Git Commit
+      # 14. 提交仓库
       # ========================================================
 
-      - name: Commit changes
-        if: env.UPDATE_NEEDED == 'true'
-        shell: bash
+      - name: Commit repository changes
+        if: env.UPDATE_AVAILABLE == 'true'
+        shell: pwsh
         run: |
 
-          set -e
+          $ErrorActionPreference = "Stop"
 
 
-          git config \
-            user.name \
-            "github-actions[bot]"
+          git config user.name `
+              "github-actions[bot]"
+
+          git config user.email `
+              "41898282+github-actions[bot]@users.noreply.github.com"
 
 
-          git config \
-            user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
+          git add `
+              "$env:FILE_NAME" `
+              ".github/workflows/$env:ISO_WORKFLOW" `
+              "dev-build-info.json"
 
 
-          git add \
-            "$FILE_NAME"
+          Write-Host ""
+          Write-Host "Git status:"
+          git status
 
 
-          git add \
-            "$WORKFLOW_FILE"
+          git diff --cached --stat
 
 
-          if git diff --cached --quiet; then
-
-            echo "没有需要提交的修改。"
-
-            exit 0
-
-          fi
+          git commit `
+              -m "Update Windows 11 Experimental Build $env:TARGET_BUILD"
 
 
-          git commit \
-            -m \
-            "Update Windows 11 Dev 26340 to $LATEST_BUILD"
+          git push
 
 
       # ========================================================
-      # 20. Push
+      # 15. 自动启动 ISO 工作流
       # ========================================================
 
-      - name: Push repository update
-        if: env.UPDATE_NEEDED == 'true'
-        shell: bash
-        run: |
-
-          set -e
-
-
-          git push \
-            origin \
-            "HEAD:${GITHUB_REF_NAME}"
-
-
-          echo ""
-
-          echo "仓库更新成功。"
-
-
-      # ========================================================
-      # 21. 启动 ISO Workflow
-      #
-      # 使用 GH_PAT。
-      #
-      # 不依赖 GITHUB_TOKEN 的 push 自动触发。
-      # ========================================================
-
-      - name: Start ISO build workflow
-        if: env.UPDATE_NEEDED == 'true'
+      - name: Trigger ISO workflow
+        if: env.UPDATE_AVAILABLE == 'true'
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
-        shell: bash
         run: |
 
-          set -e
+          $ErrorActionPreference = "Stop"
 
 
-          echo "=========================================="
-
-          echo "启动 ISO Workflow"
-
-          echo "=========================================="
-
-
-          if [ -z "$GH_TOKEN" ]; then
-
-            echo "ERROR: 没有找到 GH_PAT"
-
-            echo ""
-
-            echo "请检查："
-
-            echo "Settings"
-
-            echo "→ Secrets and variables"
-
-            echo "→ Actions"
-
-            echo "→ Repository secrets"
-
-            echo "→ GH_PAT"
-
-            exit 1
-
-          fi
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "Trigger ISO workflow"
+          Write-Host "=========================================="
 
 
-          gh workflow run \
-            "Windows11_Insider_Preview_Feature_Update_Dev_amd64.yml" \
-            --ref "${GITHUB_REF_NAME}"
+          gh workflow run `
+              "$env:ISO_WORKFLOW" `
+              --ref main
 
 
-          echo ""
+          if ($LASTEXITCODE -ne 0) {
 
-          echo "ISO Workflow 已成功启动。"
+              throw "Failed to trigger ISO workflow."
+          }
+
+
+          Write-Host ""
+          Write-Host "ISO workflow triggered successfully."
 
 
       # ========================================================
-      # 22. 完成
+      # 16. 无更新
       # ========================================================
 
-      - name: Completed
-        if: env.UPDATE_NEEDED == 'true'
-        shell: bash
+      - name: No update summary
+        if: env.UPDATE_AVAILABLE == 'false'
+        shell: pwsh
         run: |
 
-          echo "=========================================="
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "NO UPDATE"
+          Write-Host "=========================================="
 
-          echo "自动更新完成"
+          Write-Host "Current Build:"
+          Write-Host $env:CURRENT_BUILD
 
-          echo "=========================================="
+          Write-Host ""
+
+          Write-Host "Microsoft Experimental Build:"
+          Write-Host $env:TARGET_BUILD
+
+          Write-Host ""
+
+          Write-Host "No repository changes were made."
 
 
-          echo "Build    : $LATEST_BUILD"
-
-          echo "Language : $LANGUAGE"
-
-          echo "Edition  : $EDITION"
-
-          echo "Target   : $TARGET_BUILD_MAJOR"
-
-
-          echo ""
-
-          echo "UUP Package 已整体替换。"
-
-          echo "Build_VERSION 已更新。"
-
-          echo "ISO Workflow 已启动。"
+      # ========================================================
+      # 17. 完成
+      # ==========================================
