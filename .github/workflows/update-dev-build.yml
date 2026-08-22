@@ -18,13 +18,11 @@ permissions:
   actions: write
 
 env:
-
   # ============================================================
   # Microsoft Windows Insider Experimental 主频道
   # ============================================================
 
-  MICROSOFT_EXPERIMENTAL_URL: >-
-    https://learn.microsoft.com/zh-cn/windows-insider/release-notes/experimental/preview-build-26340-9233
+  MICROSOFT_EXPERIMENTAL_URL: 'https://learn.microsoft.com/zh-cn/windows-insider/release-notes/experimental/preview-build-26340-9233'
 
   # ============================================================
   # UUP Dump
@@ -37,21 +35,19 @@ env:
   FLIGHT: 'Mainline'
 
   # ============================================================
-  # 只使用简体中文
+  # 语言
   # ============================================================
 
   LANGUAGE: 'zh-cn'
 
   # ============================================================
-  # UUP 基础 SKU
-  #
-  # 专业版
+  # 基础 SKU
   # ============================================================
 
   EDITION: 'professional'
 
   # ============================================================
-  # 目标目录
+  # UUP 目录
   # ============================================================
 
   FILE_NAME: 'Windows11_Insider_Preview_Feature_Update_Dev_amd64'
@@ -64,9 +60,7 @@ env:
 
 
 jobs:
-
   update:
-
     name: Detect Experimental Build and Update UUP Package
 
     runs-on: windows-latest
@@ -85,54 +79,34 @@ jobs:
 
 
       # ========================================================
-      # 2. 从现有 ISO 工作流读取当前 Build
-      #
-      # 不再写死 26340.9233
-      #
-      # 如果以后：
-      #
-      # 26340.9233
-      # ↓
-      # 26340.9500
-      #
-      # 或：
-      #
-      # 26H2
-      # ↓
-      # 27H2
-      #
-      # 都不需要修改这里
+      # 2. 读取当前 Build
       # ========================================================
 
       - name: Read current Build
         shell: pwsh
         run: |
-
           $ErrorActionPreference = "Stop"
 
           $workflow = ".github/workflows/$env:ISO_WORKFLOW"
 
-          if (-not (Test-Path $workflow)) {
-
+          if (-not (Test-Path -LiteralPath $workflow)) {
               throw "ISO workflow not found: $workflow"
           }
 
-          $content = Get-Content $workflow -Raw
+          $content = Get-Content -LiteralPath $workflow -Raw
 
           $match = [regex]::Match(
               $content,
-              "Build_VERSION:\s*['""]([^'""]+)['""]"
+              "Build_VERSION\s*:\s*['""]([^'""]+)['""]"
           )
 
           if (-not $match.Success) {
-
               throw "Build_VERSION was not found in ISO workflow."
           }
 
           $currentBuild = $match.Groups[1].Value.Trim()
 
           if ($currentBuild -notmatch '^\d+\.\d+$') {
-
               throw "Invalid current Build: $currentBuild"
           }
 
@@ -143,31 +117,16 @@ jobs:
           Write-Host $currentBuild
           Write-Host ""
 
-          "CURRENT_BUILD=$currentBuild" >> $env:GITHUB_ENV
+          "CURRENT_BUILD=$currentBuild" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
 
       # ========================================================
       # 3. 读取 Microsoft Experimental 主频道
-      #
-      # 重要：
-      #
-      # 不读取：
-      #
-      # Beta
-      # Experimental (26H1)
-      # Experimental (Future Platforms)
-      #
-      # 只寻找：
-      #
-      # /experimental/preview-build-xxxxx-xxxx
-      #
-      # 这种普通 Experimental 页面
       # ========================================================
 
       - name: Read Microsoft Experimental sidebar
         shell: pwsh
         run: |
-
           $ErrorActionPreference = "Stop"
 
           Write-Host ""
@@ -195,34 +154,29 @@ jobs:
           $html = $response.Content
 
           if ([string]::IsNullOrWhiteSpace($html)) {
-
               throw "Microsoft returned empty HTML."
           }
 
-          # 保存页面用于调试
-          $html |
-              Out-File `
-                  "microsoft-experimental.html" `
-                  -Encoding utf8
+          $html | Out-File `
+              -FilePath "microsoft-experimental.html" `
+              -Encoding utf8
 
           Write-Host "Microsoft page downloaded."
 
-
           # ====================================================
-          # 提取普通 Experimental 主频道的 Build 页面
+          # 只匹配普通 Experimental Preview Build
           #
-          # 只接受：
+          # 允许：
           #
           # /experimental/preview-build-26340-9233
           #
-          # 而不是：
+          # 不匹配：
           #
           # /experimental/26h1/...
           # /experimental/future-platforms/...
           # ====================================================
 
-          $pattern =
-              'href\s*=\s*["'']([^"'']*/windows-insider/release-notes/experimental/preview-build-(\d+)-(\d+)[^"'']*)["'']'
+          $pattern = 'href\s*=\s*["'']([^"'']*/windows-insider/release-notes/experimental/preview-build-(\d+)-(\d+)[^"'']*)["'']'
 
           $matches = [regex]::Matches(
               $html,
@@ -230,12 +184,9 @@ jobs:
               [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
           )
 
-
           $builds = @()
 
-
           foreach ($m in $matches) {
-
               $href = $m.Groups[1].Value
 
               $major = [int64]$m.Groups[2].Value
@@ -251,25 +202,20 @@ jobs:
               }
           }
 
-
-          # 去重
-          $builds = $builds |
+          $builds = @(
+              $builds |
               Sort-Object Build -Unique
-
+          )
 
           Write-Host ""
           Write-Host "Experimental main-channel builds found:"
           Write-Host ""
 
-
           foreach ($item in $builds) {
-
               Write-Host "$($item.Build)"
           }
 
-
           if ($builds.Count -eq 0) {
-
               throw @"
 No Experimental main-channel builds were found.
 
@@ -280,29 +226,15 @@ Beta / Experimental 26H1 / Experimental Future Platforms.
 "@
           }
 
-
           # ====================================================
-          # 按 Build 数字排序
-          #
-          # 注意：
-          #
-          # 这里不是简单字符串排序
-          #
-          # 例如：
-          #
-          # 26340.9233
-          # 27000.1000
-          #
-          # 会正确比较
+          # 按数字排序
           # ====================================================
 
-          $target =
-              $builds |
+          $target = $builds |
               Sort-Object `
-                  @{Expression = "Major"; Descending = $true},
-                  @{Expression = "Minor"; Descending = $true} |
+                  @{ Expression = "Major"; Descending = $true },
+                  @{ Expression = "Minor"; Descending = $true } |
               Select-Object -First 1
-
 
           Write-Host ""
           Write-Host "=========================================="
@@ -312,44 +244,41 @@ Beta / Experimental 26H1 / Experimental Future Platforms.
           Write-Host "URL   : $($target.Url)"
           Write-Host ""
 
+          "TARGET_BUILD=$($target.Build)" |
+              Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-          "TARGET_BUILD=$($target.Build)" >> $env:GITHUB_ENV
-
-          "TARGET_BUILD_URL=$($target.Url)" >> $env:GITHUB_ENV
+          "TARGET_BUILD_URL=$($target.Url)" |
+              Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
 
       # ========================================================
-      # 4. 比较当前 Build
+      # 4. 比较 Build
       # ========================================================
 
       - name: Compare Build
         shell: pwsh
         run: |
-
           $ErrorActionPreference = "Stop"
 
           $current = [version]$env:CURRENT_BUILD
-          $target  = [version]$env:TARGET_BUILD
+          $target = [version]$env:TARGET_BUILD
 
           Write-Host ""
           Write-Host "=========================================="
           Write-Host "Build comparison"
           Write-Host "=========================================="
-
           Write-Host "Current: $current"
           Write-Host "Target : $target"
           Write-Host ""
 
-
           if ($target -le $current) {
-
               Write-Host "No update."
 
-              "UPDATE_AVAILABLE=false" >> $env:GITHUB_ENV
+              "UPDATE_AVAILABLE=false" |
+                  Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
               exit 0
           }
-
 
           Write-Host ""
           Write-Host "NEW BUILD FOUND"
@@ -358,28 +287,18 @@ Beta / Experimental 26H1 / Experimental Future Platforms.
           Write-Host "New: $target"
           Write-Host ""
 
-          "UPDATE_AVAILABLE=true" >> $env:GITHUB_ENV
+          "UPDATE_AVAILABLE=true" |
+              Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
 
       # ========================================================
       # 5. UUP API 精确验证
-      #
-      # 不让 UUP API 自己猜最新版本
-      #
-      # 而是：
-      #
-      # Microsoft Experimental
-      #        ↓
-      # TARGET_BUILD
-      #        ↓
-      # UUP API 精确查询
       # ========================================================
 
       - name: Verify exact Build with UUP API
         if: env.UPDATE_AVAILABLE == 'true'
         shell: pwsh
         run: |
-
           $ErrorActionPreference = "Stop"
 
           Write-Host ""
@@ -389,81 +308,49 @@ Beta / Experimental 26H1 / Experimental Future Platforms.
 
           $build = $env:TARGET_BUILD
 
-          $uri =
-              "$env:UUP_API/fetchupd.php" +
-              "?arch=$env:ARCH" +
-              "&ring=$env:RING" +
-              "&flight=$env:FLIGHT" +
-              "&build=$build"
+          $uri = "$env:UUP_API/fetchupd.php?arch=$env:ARCH&ring=$env:RING&flight=$env:FLIGHT&build=$build"
 
           Write-Host "Build:"
           Write-Host $build
-
           Write-Host ""
           Write-Host "UUP API:"
           Write-Host $uri
           Write-Host ""
-
 
           $response = Invoke-RestMethod `
               -Uri $uri `
               -Method Get `
               -TimeoutSec 120
 
-
           $response |
               ConvertTo-Json -Depth 50 |
               Out-File `
-                  "uup-response.json" `
+                  -FilePath "uup-response.json" `
                   -Encoding utf8
-
 
           Write-Host ""
           Write-Host "UUP API response:"
-          $response |
-              ConvertTo-Json -Depth 20
-
-
-          # ====================================================
-          # 找到 updateArray
-          # ====================================================
+          $response | ConvertTo-Json -Depth 20
 
           $updates = $null
 
-
           if ($null -ne $response.response.updateArray) {
-
               $updates = @($response.response.updateArray)
           }
           elseif ($null -ne $response.response.updates) {
-
               $updates = @($response.response.updates)
           }
           elseif ($null -ne $response.response.updateInfo) {
-
               $updates = @($response.response.updateInfo)
           }
 
-
           if ($null -eq $updates -or $updates.Count -eq 0) {
-
               throw "UUP API returned no update information."
           }
 
-
-          # ====================================================
-          # 找精确 Build
-          # ====================================================
-
           $matched = @()
 
-
           foreach ($item in $updates) {
-
-              $json =
-                  $item |
-                  ConvertTo-Json -Depth 30
-
               $itemBuild = $null
 
               foreach ($property in @(
@@ -471,26 +358,18 @@ Beta / Experimental 26H1 / Experimental Future Platforms.
                   "build",
                   "updateBuild"
               )) {
-
                   if ($item.PSObject.Properties.Name -contains $property) {
-
-                      $itemBuild =
-                          [string]$item.$property
-
+                      $itemBuild = [string]$item.$property
                       break
                   }
               }
 
-
               if ($itemBuild -eq $build) {
-
                   $matched += $item
               }
           }
 
-
           if ($matched.Count -eq 0) {
-
               throw @"
 UUP API did not return the exact requested Build.
 
@@ -501,31 +380,19 @@ This workflow will NOT download another Build.
 "@
           }
 
-
-          # ====================================================
-          # 获取 Update ID
-          # ====================================================
-
           $updateId = $null
 
-
           foreach ($item in $matched) {
-
               foreach ($property in @(
                   "updateId",
                   "uuid",
                   "id"
               )) {
-
                   if ($item.PSObject.Properties.Name -contains $property) {
-
-                      $candidate =
-                          [string]$item.$property
+                      $candidate = [string]$item.$property
 
                       if ($candidate -match '^[0-9a-fA-F-]{36}') {
-
                           $updateId = $candidate
-
                           break
                       }
                   }
@@ -536,12 +403,9 @@ This workflow will NOT download another Build.
               }
           }
 
-
           if (-not $updateId) {
-
               throw "Exact Build was found, but Update ID was not returned."
           }
-
 
           Write-Host ""
           Write-Host "=========================================="
@@ -554,8 +418,8 @@ This workflow will NOT download another Build.
           Write-Host $updateId
           Write-Host ""
 
-
-          "UUP_UPDATE_ID=$updateId" >> $env:GITHUB_ENV
+          "UUP_UPDATE_ID=$updateId" |
+              Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
 
       # ========================================================
@@ -566,13 +430,11 @@ This workflow will NOT download another Build.
         if: env.UPDATE_AVAILABLE == 'true'
         shell: pwsh
         run: |
-
           $ErrorActionPreference = "Stop"
 
-          if (Test-Path "_uup_update") {
-
+          if (Test-Path -LiteralPath "_uup_update") {
               Remove-Item `
-                  "_uup_update" `
+                  -LiteralPath "_uup_update" `
                   -Recurse `
                   -Force
           }
@@ -585,26 +447,12 @@ This workflow will NOT download another Build.
 
       # ========================================================
       # 7. 下载 UUP 转换包
-      #
-      # 这里严格按照你的配置：
-      #
-      # Windows 专业版
-      # zh-cn
-      # 下载并转换 ISO
-      # 包括更新
-      # 运行组件清理
-      # 集成 .NET 3.5
-      # 固实压缩
-      # 虚拟版本全部
-      #
-      # autodl=3 = 下载 + 转换 + 虚拟版本
       # ========================================================
 
       - name: Download UUP conversion package
         if: env.UPDATE_AVAILABLE == 'true'
         shell: pwsh
         run: |
-
           $ErrorActionPreference = "Stop"
 
           Write-Host ""
@@ -614,41 +462,18 @@ This workflow will NOT download another Build.
 
           Write-Host "Build:"
           Write-Host $env:TARGET_BUILD
-
           Write-Host ""
           Write-Host "Update ID:"
           Write-Host $env:UUP_UPDATE_ID
 
-
-          # ====================================================
-          # UUP Dump package URL
-          # ====================================================
-
-          $packageUrl =
-              "https://uupdump.net/get.php" +
-              "?id=$env:UUP_UPDATE_ID" +
-              "&pack=$env:LANGUAGE" +
-              "&edition=$env:EDITION"
-
+          $packageUrl = "https://uupdump.net/get.php?id=$env:UUP_UPDATE_ID&pack=$env:LANGUAGE&edition=$env:EDITION"
 
           Write-Host ""
           Write-Host "Package URL:"
           Write-Host $packageUrl
 
-
           # ====================================================
           # 虚拟版本
-          #
-          # 你的要求：
-          #
-          # 专业工作站版
-          # 专业教育版
-          # 教育版
-          # 企业版
-          # 企业版多会话/虚拟桌面
-          # IoT 企业版
-          # IoT 企业版订阅
-          #
           # ====================================================
 
           $virtualEditions = @(
@@ -661,11 +486,8 @@ This workflow will NOT download another Build.
               "IoTEnterpriseSubscription"
           )
 
-
           # ====================================================
-          # 构造 application/x-www-form-urlencoded
-          #
-          # virtualEditions[] 必须重复发送
+          # 构造 POST 数据
           # ====================================================
 
           $formParts = @()
@@ -674,24 +496,14 @@ This workflow will NOT download another Build.
           $formParts += "updates=1"
           $formParts += "cleanup=1"
           $formParts += "netfx=1"
-
-          # 使用固实压缩
           $formParts += "esd=1"
 
-
           foreach ($edition in $virtualEditions) {
-
-              $encoded =
-                  [System.Uri]::EscapeDataString($edition)
-
-              $formParts +=
-                  "virtualEditions%5B%5D=$encoded"
+              $encoded = [System.Uri]::EscapeDataString($edition)
+              $formParts += "virtualEditions%5B%5D=$encoded"
           }
 
-
-          $body =
-              $formParts -join "&"
-
+          $body = $formParts -join "&"
 
           Write-Host ""
           Write-Host "UUP conversion options:"
@@ -704,27 +516,14 @@ This workflow will NOT download another Build.
           Write-Host "  Virtual  : ALL"
           Write-Host ""
 
-
-          $zipPath =
-              Join-Path `
-                  $PWD `
-                  "_uup_update\uup_package.zip"
-
+          $zipPath = Join-Path $PWD "_uup_update\uup_package.zip"
 
           $downloaded = $false
 
-
-          # ====================================================
-          # 自动重试
-          # ====================================================
-
           for ($attempt = 1; $attempt -le 5; $attempt++) {
-
               try {
-
                   Write-Host ""
                   Write-Host "Download attempt $attempt / 5"
-
 
                   Invoke-WebRequest `
                       -Uri $packageUrl `
@@ -734,35 +533,28 @@ This workflow will NOT download another Build.
                       -OutFile $zipPath `
                       -TimeoutSec 300
 
-
                   if (
-                      (Test-Path $zipPath) -and
-                      ((Get-Item $zipPath).Length -gt 1000)
+                      (Test-Path -LiteralPath $zipPath) -and
+                      ((Get-Item -LiteralPath $zipPath).Length -gt 1000)
                   ) {
-
                       $downloaded = $true
-
                       break
                   }
-
               }
               catch {
-
                   Write-Host ""
                   Write-Host "Download failed:"
                   Write-Host $_
               }
 
-
-              Start-Sleep -Seconds 15
+              if ($attempt -lt 5) {
+                  Start-Sleep -Seconds 15
+              }
           }
-
 
           if (-not $downloaded) {
-
               throw "Failed to download UUP conversion package after 5 attempts."
           }
-
 
           Write-Host ""
           Write-Host "UUP conversion package downloaded."
@@ -776,43 +568,33 @@ This workflow will NOT download another Build.
         if: env.UPDATE_AVAILABLE == 'true'
         shell: pwsh
         run: |
-
           $ErrorActionPreference = "Stop"
 
-          $zip =
-              "_uup_update\uup_package.zip"
+          $zip = "_uup_update\uup_package.zip"
+          $extract = "_uup_update\extracted"
 
-          $extract =
-              "_uup_update\extracted"
-
-
-          if (Test-Path $extract) {
-
+          if (Test-Path -LiteralPath $extract) {
               Remove-Item `
-                  $extract `
+                  -LiteralPath $extract `
                   -Recurse `
                   -Force
           }
-
 
           New-Item `
               -ItemType Directory `
               -Path $extract |
               Out-Null
 
-
           Expand-Archive `
               -Path $zip `
               -DestinationPath $extract `
               -Force
 
-
           Write-Host ""
           Write-Host "Extracted package:"
 
-
           Get-ChildItem `
-              $extract `
+              -LiteralPath $extract `
               -Recurse `
               -File |
               Select-Object FullName, Length
@@ -826,27 +608,17 @@ This workflow will NOT download another Build.
         if: env.UPDATE_AVAILABLE == 'true'
         shell: pwsh
         run: |
-
           $ErrorActionPreference = "Stop"
 
-          $root =
-              "_uup_update\extracted"
+          $root = "_uup_update\extracted"
 
-
-          # ====================================================
-          # 找 uup_download_windows.cmd
-          # ====================================================
-
-          $cmd =
-              Get-ChildItem `
-                  $root `
-                  -Recurse `
-                  -Filter "uup_download_windows.cmd" |
+          $cmd = Get-ChildItem `
+              -LiteralPath $root `
+              -Recurse `
+              -Filter "uup_download_windows.cmd" |
               Select-Object -First 1
 
-
           if (-not $cmd) {
-
               throw @"
 uup_download_windows.cmd was not found.
 
@@ -854,55 +626,40 @@ The downloaded UUP package may be invalid.
 "@
           }
 
-
-          $source =
-              $cmd.Directory.FullName
-
+          $source = $cmd.Directory.FullName
 
           Write-Host ""
           Write-Host "UUP package root:"
           Write-Host $source
-
-
-          # ====================================================
-          # 验证必要文件
-          # ====================================================
 
           $required = @(
               "uup_download_windows.cmd",
               "ConvertConfig.ini"
           )
 
-
           foreach ($file in $required) {
+              $path = Join-Path $source $file
 
-              if (-not (Test-Path (Join-Path $source $file))) {
-
+              if (-not (Test-Path -LiteralPath $path)) {
                   throw "Required file missing: $file"
               }
           }
 
-
-          # ====================================================
-          # 保存真正的 UUP 根目录
-          # ====================================================
-
-          "UUP_SOURCE=$source" >> $env:GITHUB_ENV
+          "UUP_SOURCE=$source" |
+              Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
 
       # ========================================================
-      # 10. 验证 UUP 包配置
+      # 10. 验证 UUP 配置
       # ========================================================
 
       - name: Verify UUP package configuration
         if: env.UPDATE_AVAILABLE == 'true'
         shell: pwsh
         run: |
-
           $ErrorActionPreference = "Stop"
 
           $source = $env:UUP_SOURCE
-
 
           Write-Host ""
           Write-Host "=========================================="
@@ -910,25 +667,11 @@ The downloaded UUP package may be invalid.
           Write-Host "=========================================="
           Write-Host ""
 
-
-          $config =
-              Get-Content `
-                  (Join-Path $source "ConvertConfig.ini") `
-                  -Raw
-
+          $config = Get-Content `
+              -LiteralPath (Join-Path $source "ConvertConfig.ini") `
+              -Raw
 
           Write-Host $config
-
-
-          # ====================================================
-          # 检查：
-          #
-          # 更新
-          # 清理
-          # NetFx3
-          # 固实压缩
-          # 虚拟版本
-          # ====================================================
 
           foreach ($check in @(
               "AddUpdates",
@@ -937,166 +680,104 @@ The downloaded UUP package may be invalid.
               "wim2esd",
               "StartVirtual"
           )) {
-
-              if (
-                  $config `
-                  -notmatch "(?im)^\s*$check\s*="
-              ) {
-
+              if ($config -notmatch "(?im)^\s*$check\s*=") {
                   Write-Host "WARNING: $check not found."
               }
           }
-
 
           Write-Host ""
           Write-Host "UUP package verification completed."
 
 
       # ========================================================
-      # 11. 完整替换整个目录
-      #
-      # 旧目录：
-      #
-      # Windows11_Insider_Preview_Feature_Update_Dev_amd64
-      #
-      # 全部删除
-      #
-      # 包括：
-      #
-      # file\
-      # *.cmd
-      # *.bat
-      # *.ini
-      # *.txt
-      # *.7z
-      # 其他所有文件
-      #
-      # 然后使用新的 UUP 包完整替换
+      # 11. 完整替换 UUP 目录
       # ========================================================
 
       - name: Replace entire UUP directory
         if: env.UPDATE_AVAILABLE == 'true'
         shell: pwsh
         run: |
-
           $ErrorActionPreference = "Stop"
 
           $source = $env:UUP_SOURCE
           $target = $env:FILE_NAME
-
 
           Write-Host ""
           Write-Host "=========================================="
           Write-Host "Replace entire UUP directory"
           Write-Host "=========================================="
 
-
-          # ====================================================
-          # 删除整个旧目录
-          # ====================================================
-
-          if (Test-Path $target) {
-
+          if (Test-Path -LiteralPath $target) {
               Write-Host "Removing old directory..."
 
               Remove-Item `
-                  $target `
+                  -LiteralPath $target `
                   -Recurse `
                   -Force
           }
-
-
-          # ====================================================
-          # 创建新目录
-          # ====================================================
 
           New-Item `
               -ItemType Directory `
               -Path $target |
               Out-Null
 
-
-          # ====================================================
-          # 完整复制
-          # ====================================================
-
           Copy-Item `
-              "$source\*" `
-              "$target\" `
+              -Path (Join-Path $source "*") `
+              -Destination $target `
               -Recurse `
               -Force
 
-
           Write-Host ""
           Write-Host "Directory replacement completed."
-
 
           Write-Host ""
           Write-Host "New directory:"
           Write-Host ""
 
-
           Get-ChildItem `
-              $target `
+              -LiteralPath $target `
               -Recurse `
               -File |
               Select-Object FullName, Length
 
 
       # ========================================================
-      # 12. 修改 ISO 工作流 Build_VERSION
-      #
-      # 只修改：
-      #
-      # Build_VERSION
-      #
-      # 不进行危险的全目录数字替换
-      #
-      # 因为 UUP 新下载包本身已经包含正确 Build
+      # 12. 更新 ISO Workflow Build_VERSION
       # ========================================================
 
       - name: Update ISO workflow Build_VERSION
         if: env.UPDATE_AVAILABLE == 'true'
         shell: pwsh
         run: |
-
           $ErrorActionPreference = "Stop"
 
-          $workflow =
-              ".github/workflows/$env:ISO_WORKFLOW"
+          $workflow = ".github/workflows/$env:ISO_WORKFLOW"
 
-
-          if (-not (Test-Path $workflow)) {
-
+          if (-not (Test-Path -LiteralPath $workflow)) {
               throw "ISO workflow not found: $workflow"
           }
 
+          $content = Get-Content `
+              -LiteralPath $workflow `
+              -Raw
 
-          $content =
-              Get-Content `
-                  $workflow `
-                  -Raw
+          $pattern = "(Build_VERSION\s*:\s*)['""][^'""]+['""]"
+          $replacement = "`$1'$env:TARGET_BUILD'"
 
-
-          $newContent =
-              [regex]::Replace(
-                  $content,
-                  "(Build_VERSION:\s*)['""][^'""]+['""]",
-                  "`$1'$env:TARGET_BUILD'"
-              )
-
+          $newContent = [regex]::Replace(
+              $content,
+              $pattern,
+              $replacement
+          )
 
           if ($newContent -eq $content) {
-
               throw "Build_VERSION was not changed."
           }
 
-
           Set-Content `
-              -Path $workflow `
+              -LiteralPath $workflow `
               -Value $newContent `
-              -Encoding UTF8
-
+              -Encoding utf8
 
           Write-Host ""
           Write-Host "ISO workflow Build_VERSION updated:"
@@ -1111,86 +792,96 @@ The downloaded UUP package may be invalid.
         if: env.UPDATE_AVAILABLE == 'true'
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
 
           $info = [ordered]@{
-
-              Channel = "Experimental"
-
-              Ring = "Dev"
-
-              Flight = "Mainline"
-
-              Architecture = "amd64"
-
-              Language = "zh-cn"
-
-              Edition = "professional"
-
-              Build = $env:TARGET_BUILD
-
-              PreviousBuild = $env:CURRENT_BUILD
-
+              Channel               = "Experimental"
+              Ring                  = "Dev"
+              Flight                = "Mainline"
+              Architecture         = "amd64"
+              Language              = "zh-cn"
+              Edition               = "professional"
+              Build                 = $env:TARGET_BUILD
+              PreviousBuild         = $env:CURRENT_BUILD
               MicrosoftReleaseNotes = $env:TARGET_BUILD_URL
-
-              UUPUpdateID = $env:UUP_UPDATE_ID
-
-              UpdatedAt = (Get-Date).ToUniversalTime().ToString("o")
+              UUPUpdateID           = $env:UUP_UPDATE_ID
+              UpdatedAt             = (Get-Date).ToUniversalTime().ToString("o")
           }
-
 
           $info |
               ConvertTo-Json -Depth 10 |
               Out-File `
-                  "dev-build-info.json" `
+                  -FilePath "dev-build-info.json" `
                   -Encoding utf8
-
 
           Write-Host ""
           Get-Content "dev-build-info.json"
 
 
       # ========================================================
-      # 14. 提交仓库
+      # 14. 检查 Git 变更
       # ========================================================
 
-      - name: Commit repository changes
+      - name: Check repository changes
         if: env.UPDATE_AVAILABLE == 'true'
         shell: pwsh
         run: |
-
           $ErrorActionPreference = "Stop"
 
-
-          git config user.name `
-              "github-actions[bot]"
-
-          git config user.email `
-              "41898282+github-actions[bot]@users.noreply.github.com"
-
+          git status --short
 
           git add `
               "$env:FILE_NAME" `
               ".github/workflows/$env:ISO_WORKFLOW" `
               "dev-build-info.json"
 
-
           Write-Host ""
-          Write-Host "Git status:"
-          git status
-
-
+          Write-Host "Staged changes:"
           git diff --cached --stat
 
+          if (-not (git diff --cached --quiet)) {
+              Write-Host ""
+              Write-Host "Changes detected."
+          }
+          else {
+              Write-Host ""
+              Write-Host "No staged changes detected."
+          }
+
+
+      # ========================================================
+      # 15. 提交仓库
+      # ========================================================
+
+      - name: Commit repository changes
+        if: env.UPDATE_AVAILABLE == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if (git diff --cached --quiet) {
+              Write-Host "Nothing to commit."
+              exit 0
+          }
 
           git commit `
               -m "Update Windows 11 Experimental Build $env:TARGET_BUILD"
 
-
           git push
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "git push failed."
+          }
+
+          Write-Host ""
+          Write-Host "Repository updated successfully."
 
 
       # ========================================================
-      # 15. 自动启动 ISO 工作流
+      # 16. 启动 ISO Workflow
       # ========================================================
 
       - name: Trigger ISO workflow
@@ -1199,40 +890,33 @@ The downloaded UUP package may be invalid.
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
-
           $ErrorActionPreference = "Stop"
-
 
           Write-Host ""
           Write-Host "=========================================="
           Write-Host "Trigger ISO workflow"
           Write-Host "=========================================="
 
-
           gh workflow run `
               "$env:ISO_WORKFLOW" `
               --ref main
 
-
           if ($LASTEXITCODE -ne 0) {
-
               throw "Failed to trigger ISO workflow."
           }
-
 
           Write-Host ""
           Write-Host "ISO workflow triggered successfully."
 
 
       # ========================================================
-      # 16. 无更新
+      # 17. 无更新
       # ========================================================
 
       - name: No update summary
         if: env.UPDATE_AVAILABLE == 'false'
         shell: pwsh
         run: |
-
           Write-Host ""
           Write-Host "=========================================="
           Write-Host "NO UPDATE"
@@ -1252,5 +936,14 @@ The downloaded UUP package may be invalid.
 
 
       # ========================================================
-      # 17. 完成
-      # ==========================================
+      # 18. 完成
+      # ========================================================
+
+      - name: Completed
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "Workflow finished"
+          Write-Host "=========================================="
