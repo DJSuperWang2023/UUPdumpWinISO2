@@ -1,0 +1,1048 @@
+name: Update Windows 11 Dev amd64 UUP Package
+
+on:
+  schedule:
+    # 每天 UTC 00:00 自动检查
+    # 新加坡时间 = UTC+8，即每天 08:00
+    - cron: '0 0 * * *'
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # ============================================================
+  # 仓库目录
+  # ============================================================
+
+  FILE_NAME: Windows11_Insider_Preview_Feature_Update_Dev_amd64
+
+  # 第二个 Workflow
+  WORKFLOW_FILE: .github/workflows/Windows11_Insider_Preview_Feature_Update_Dev_amd64.yml
+
+  # 当前仓库最低 Build
+  MIN_BUILD: '26340.9233'
+
+  # ============================================================
+  # UUP dump
+  # ============================================================
+
+  UUP_API: https://api.uupdump.net
+
+  UUP_SITE: https://uupdump.net
+
+  # ★ 固定简体中文
+  LANGUAGE: zh-cn
+
+  # ★ 主 SKU
+  EDITION: Professional
+
+
+jobs:
+
+  update:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ========================================================
+      # 1. Checkout
+      # ========================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+
+      # ========================================================
+      # 2. 安装 jq
+      # ========================================================
+
+      - name: Install jq
+        shell: bash
+        run: |
+
+          set -e
+
+          sudo apt-get update
+
+          sudo apt-get install -y jq unzip
+
+
+      # ========================================================
+      # 3. 读取当前 Build_VERSION
+      # ========================================================
+
+      - name: Read current Build
+        shell: bash
+        run: |
+
+          set -e
+
+          echo "=========================================="
+          echo "Current repository Build"
+          echo "=========================================="
+
+          CURRENT_BUILD=$(
+            grep -oP \
+              "Build_VERSION:\s*['\"]\K[0-9]+\.[0-9]+" \
+              "${WORKFLOW_FILE}" \
+              | head -n 1
+          )
+
+          if [ -z "$CURRENT_BUILD" ]; then
+            echo "ERROR: Build_VERSION not found."
+            exit 1
+          fi
+
+          echo "Current Build: $CURRENT_BUILD"
+
+          echo "CURRENT_BUILD=$CURRENT_BUILD" >> "$GITHUB_ENV"
+
+
+      # ========================================================
+      # 4. 查询 UUP dump
+      # ========================================================
+
+      - name: Query latest Dev amd64 Build
+        shell: bash
+        run: |
+
+          set -e
+
+          echo "=========================================="
+          echo "Query UUP dump"
+          echo "=========================================="
+
+          API_URL="${UUP_API}/fetchupd.php?arch=amd64&ring=Dev&flight=Mainline"
+
+          echo "$API_URL"
+
+          curl \
+            --fail \
+            --retry 5 \
+            --retry-delay 5 \
+            --connect-timeout 30 \
+            --max-time 180 \
+            -L \
+            "$API_URL" \
+            -o latest.json
+
+          echo ""
+          echo "UUP dump API response:"
+          cat latest.json
+
+
+          # 检查 API 错误
+
+          if jq -e '.response.error' latest.json >/dev/null 2>&1; then
+
+            echo "ERROR: UUP dump API returned an error."
+
+            jq '.response.error' latest.json
+
+            exit 1
+
+          fi
+
+
+          # ====================================================
+          # 找 Windows 11 26H2 + amd64
+          # ====================================================
+
+          jq -r '
+            .response.updateArray[]
+            |
+            select(.arch == "amd64")
+            |
+            select(
+              (.updateTitle | test("Windows 11"; "i"))
+              and
+              (.updateTitle | test("26H2"; "i"))
+            )
+            |
+            [
+              .foundBuild,
+              .updateId,
+              .updateTitle
+            ]
+            |
+            @tsv
+          ' latest.json > builds.tsv
+
+
+          echo ""
+          echo "Candidate builds:"
+          cat builds.tsv
+
+
+          if [ ! -s builds.tsv ]; then
+
+            echo "ERROR:"
+            echo "No Windows 11 26H2 amd64 Build found."
+
+            exit 1
+
+          fi
+
+
+          # ====================================================
+          # 按 Build 号排序
+          # ====================================================
+
+          LATEST_LINE=$(
+            sort \
+              -t. \
+              -k1,1n \
+              -k2,2n \
+              builds.tsv \
+              | tail -n 1
+          )
+
+
+          LATEST_BUILD=$(echo "$LATEST_LINE" | cut -f1)
+
+          UPDATE_ID=$(echo "$LATEST_LINE" | cut -f2)
+
+          UPDATE_TITLE=$(echo "$LATEST_LINE" | cut -f3-)
+
+
+          echo ""
+          echo "=========================================="
+          echo "Latest Build"
+          echo "=========================================="
+
+          echo "Build      : $LATEST_BUILD"
+          echo "Update ID  : $UPDATE_ID"
+          echo "Title      : $UPDATE_TITLE"
+
+
+          echo "LATEST_BUILD=$LATEST_BUILD" >> "$GITHUB_ENV"
+
+          echo "UPDATE_ID=$UPDATE_ID" >> "$GITHUB_ENV"
+
+          echo "UPDATE_TITLE=$UPDATE_TITLE"
+
+
+      # ========================================================
+      # 5. 比较 Build
+      # ========================================================
+
+      - name: Compare Build
+        shell: bash
+        run: |
+
+          set -e
+
+          python3 <<'PY'
+
+          import os
+          import sys
+
+
+          current = os.environ["CURRENT_BUILD"]
+
+          latest = os.environ["LATEST_BUILD"]
+
+          minimum = os.environ["MIN_BUILD"]
+
+
+          def version(value):
+
+              return tuple(
+                  int(x)
+                  for x in value.split(".")
+              )
+
+
+          current_v = version(current)
+
+          latest_v = version(latest)
+
+          minimum_v = version(minimum)
+
+
+          print(f"Current Build : {current}")
+
+          print(f"Latest Build  : {latest}")
+
+          print(f"Minimum Build : {minimum}")
+
+
+          if latest_v < minimum_v:
+
+              print(
+                  "ERROR: Latest Build is below MIN_BUILD."
+              )
+
+              sys.exit(1)
+
+
+          if latest_v <= current_v:
+
+              print("No new Build.")
+
+              update = "false"
+
+          else:
+
+              print("New Build detected!")
+
+              update = "true"
+
+
+          with open(
+              os.environ["GITHUB_ENV"],
+              "a"
+          ) as f:
+
+              f.write(
+                  f"UPDATE_NEEDED={update}\n"
+              )
+
+          PY
+
+
+      # ========================================================
+      # 6. 没有更新
+      # ========================================================
+
+      - name: Stop - no update
+        if: env.UPDATE_NEEDED == 'false'
+        shell: bash
+        run: |
+
+          echo "=========================================="
+
+          echo "No update required."
+
+          echo "Current: $CURRENT_BUILD"
+
+          echo "Latest : $LATEST_BUILD"
+
+          echo "=========================================="
+
+
+      # ========================================================
+      # 7. 创建临时目录
+      # ========================================================
+
+      - name: Prepare temporary directory
+        if: env.UPDATE_NEEDED == 'true'
+        shell: bash
+        run: |
+
+          set -e
+
+          rm -rf new_package
+
+          mkdir -p new_package
+
+
+      # ========================================================
+      # 8. 生成 UUP dump Download Package
+      #
+      # 这里不是下载几十 GB 的 UUP。
+      #
+      # 下载的是你说的约 20 KB 的脚本包。
+      #
+      # autodl=3
+      # = Download + Convert + Virtual Editions
+      #
+      # updates=1
+      # cleanup=1
+      # netfx=1
+      # esd=1
+      # ========================================================
+
+      - name: Create UUP dump conversion package
+        if: env.UPDATE_NEEDED == 'true'
+        shell: bash
+        run: |
+
+          set -e
+
+          echo "=========================================="
+          echo "Create UUP dump conversion package"
+          echo "=========================================="
+
+          echo "Build     : $LATEST_BUILD"
+
+          echo "Update ID : $UPDATE_ID"
+
+          echo "Language  : $LANGUAGE"
+
+          echo "Edition   : $EDITION"
+
+
+          DOWNLOAD_PACKAGE_URL="${UUP_SITE}/get.php?id=${UPDATE_ID}&pack=${LANGUAGE}&edition=${EDITION}&aria2=2"
+
+
+          echo ""
+          echo "Package URL:"
+          echo "$DOWNLOAD_PACKAGE_URL"
+
+
+          curl \
+            --fail \
+            --retry 5 \
+            --retry-delay 5 \
+            --connect-timeout 30 \
+            --max-time 300 \
+            -L \
+            -X POST \
+            "$DOWNLOAD_PACKAGE_URL" \
+            --data-urlencode "autodl=3" \
+            --data-urlencode "updates=1" \
+            --data-urlencode "cleanup=1" \
+            --data-urlencode "netfx=1" \
+            --data-urlencode "esd=1" \
+            --data-urlencode "virtualEditions[]=ProfessionalWorkstation" \
+            --data-urlencode "virtualEditions[]=ProfessionalEducation" \
+            --data-urlencode "virtualEditions[]=Education" \
+            --data-urlencode "virtualEditions[]=Enterprise" \
+            --data-urlencode "virtualEditions[]=ServerRdsh" \
+            --data-urlencode "virtualEditions[]=IoTEnterprise" \
+            --data-urlencode "virtualEditions[]=IoTEnterpriseSubscription" \
+            -o uup_package.zip
+
+
+          echo ""
+          echo "Downloaded package:"
+
+          ls -lh uup_package.zip
+
+
+      # ========================================================
+      # 9. 验证下载包
+      # ========================================================
+
+      - name: Verify download package
+        if: env.UPDATE_NEEDED == 'true'
+        shell: bash
+        run: |
+
+          set -e
+
+          echo "=========================================="
+          echo "Verify download package"
+          echo "=========================================="
+
+
+          if [ ! -f uup_package.zip ]; then
+
+            echo "ERROR: uup_package.zip does not exist."
+
+            exit 1
+
+          fi
+
+
+          FILE_SIZE=$(
+            stat \
+              -c%s \
+              uup_package.zip
+          )
+
+
+          echo "Package size: $FILE_SIZE bytes"
+
+
+          if [ "$FILE_SIZE" -lt 1000 ]; then
+
+            echo "ERROR: ZIP package is too small."
+
+            exit 1
+
+          fi
+
+
+          echo ""
+          echo "ZIP contents:"
+
+          unzip -l uup_package.zip
+
+
+          # 必须存在 Windows 转换脚本
+
+          unzip -l uup_package.zip \
+            | grep -q \
+              "uup_download_windows.cmd"
+
+
+          # 必须存在转换配置
+
+          unzip -l uup_package.zip \
+            | grep -q \
+              "ConvertConfig.ini"
+
+
+          # 必须存在 files
+
+          unzip -l uup_package.zip \
+            | grep -q \
+              "files/"
+
+
+          echo ""
+
+          echo "Package verification passed."
+
+
+      # ========================================================
+      # 10. 解压
+      # ========================================================
+
+      - name: Extract package
+        if: env.UPDATE_NEEDED == 'true'
+        shell: bash
+        run: |
+
+          set -e
+
+          rm -rf extracted_package
+
+          mkdir -p extracted_package
+
+
+          unzip \
+            -q \
+            uup_package.zip \
+            -d extracted_package
+
+
+          echo ""
+          echo "Package files:"
+
+          find \
+            extracted_package \
+            -type f \
+            | sort
+
+
+      # ========================================================
+      # 11. 处理可能存在的顶层目录
+      # ========================================================
+
+      - name: Normalize package directory
+        if: env.UPDATE_NEEDED == 'true'
+        shell: bash
+        run: |
+
+          set -e
+
+
+          # 有些 ZIP 直接把文件放根目录。
+          # 有些 ZIP 可能包含一个顶层目录。
+          #
+          # 统一整理成：
+          #
+          # package_root/
+          # ├─ uup_download_windows.cmd
+          # ├─ ConvertConfig.ini
+          # └─ files/
+
+          if [ -f "extracted_package/uup_download_windows.cmd" ]; then
+
+            echo "Package root is extracted_package."
+
+            cp -a \
+              extracted_package/. \
+              new_package/
+
+          else
+
+            CMD_FILE=$(
+              find \
+                extracted_package \
+                -type f \
+                -name "uup_download_windows.cmd" \
+                | head -n 1
+            )
+
+            if [ -z "$CMD_FILE" ]; then
+
+              echo "ERROR:"
+              echo "uup_download_windows.cmd not found."
+
+              exit 1
+
+            fi
+
+
+            PACKAGE_ROOT=$(
+              dirname "$CMD_FILE"
+            )
+
+
+            echo "Detected package root:"
+            echo "$PACKAGE_ROOT"
+
+
+            cp -a \
+              "$PACKAGE_ROOT"/. \
+              new_package/
+
+          fi
+
+
+      # ========================================================
+      # 12. 验证完整目录
+      # ========================================================
+
+      - name: Verify complete package
+        if: env.UPDATE_NEEDED == 'true'
+        shell: bash
+        run: |
+
+          set -e
+
+
+          echo "=========================================="
+          echo "Verify complete package"
+          echo "=========================================="
+
+
+          test \
+            -f \
+            new_package/uup_download_windows.cmd
+
+
+          test \
+            -f \
+            new_package/ConvertConfig.ini
+
+
+          test \
+            -d \
+            new_package/files
+
+
+          FILE_COUNT=$(
+            find \
+              new_package \
+              -type f \
+              | wc -l
+          )
+
+
+          echo "Total files: $FILE_COUNT"
+
+
+          if [ "$FILE_COUNT" -lt 5 ]; then
+
+            echo "ERROR: Too few files."
+
+            exit 1
+
+          fi
+
+
+          echo "Package structure OK."
+
+
+      # ========================================================
+      # 13. 验证转换配置
+      # ========================================================
+
+      - name: Verify ConvertConfig.ini
+        if: env.UPDATE_NEEDED == 'true'
+        shell: bash
+        run: |
+
+          set -e
+
+
+          CONFIG="new_package/ConvertConfig.ini"
+
+
+          echo "=========================================="
+          echo "ConvertConfig.ini"
+          echo "=========================================="
+
+
+          cat "$CONFIG"
+
+
+          echo ""
+
+
+          # 包括更新
+
+          grep -Eq \
+            '^AddUpdates[[:space:]]*=[[:space:]]*1' \
+            "$CONFIG"
+
+
+          # 组件清理
+
+          grep -Eq \
+            '^Cleanup[[:space:]]*=[[:space:]]*1' \
+            "$CONFIG"
+
+
+          # .NET 3.5
+
+          grep -Eq \
+            '^NetFx3[[:space:]]*=[[:space:]]*1' \
+            "$CONFIG"
+
+
+          # ESD / 固实压缩
+
+          grep -Eq \
+            '^wim2esd[[:space:]]*=[[:space:]]*1' \
+            "$CONFIG"
+
+
+          # Virtual Editions
+
+          grep -Eq \
+            '^StartVirtual[[:space:]]*=[[:space:]]*1' \
+            "$CONFIG"
+
+
+          echo ""
+
+          echo "Conversion options verified."
+
+
+      # ========================================================
+      # 14. 验证 7 个 Virtual Editions
+      # ========================================================
+
+      - name: Verify Virtual Editions
+        if: env.UPDATE_NEEDED == 'true'
+        shell: bash
+        run: |
+
+          set -e
+
+
+          CONFIG="new_package/ConvertConfig.ini"
+
+
+          for EDITION in \
+            ProfessionalWorkstation \
+            ProfessionalEducation \
+            Education \
+            Enterprise \
+            ServerRdsh \
+            IoTEnterprise \
+            IoTEnterpriseSubscription
+          do
+
+            echo "Checking $EDITION ..."
+
+            grep -q \
+              "$EDITION" \
+              "$CONFIG"
+
+          done
+
+
+          echo ""
+
+          echo "All requested Virtual Editions verified."
+
+
+      # ========================================================
+      # 15. 整体替换旧目录
+      #
+      # 包括 files 文件夹里的全部内容。
+      # ========================================================
+
+      - name: Replace entire UUP directory
+        if: env.UPDATE_NEEDED == 'true'
+        shell: bash
+        run: |
+
+          set -e
+
+
+          echo "=========================================="
+          echo "Replace entire UUP package"
+          echo "=========================================="
+
+
+          # 删除旧目录
+
+          rm -rf "$FILE_NAME"
+
+
+          # 创建新目录
+
+          mkdir -p "$FILE_NAME"
+
+
+          # 新下载包全部复制进去
+
+          cp -a \
+            new_package/. \
+            "$FILE_NAME/"
+
+
+          echo ""
+
+          echo "New package:"
+
+          find \
+            "$FILE_NAME" \
+            -type f \
+            | sort
+
+
+      # ========================================================
+      # 16. 修改 Build_VERSION
+      # ========================================================
+
+      - name: Update Build_VERSION
+        if: env.UPDATE_NEEDED == 'true'
+        shell: bash
+        run: |
+
+          set -e
+
+
+          python3 <<'PY'
+
+          import os
+          import re
+
+
+          path = os.environ["WORKFLOW_FILE"]
+
+          new_build = os.environ["LATEST_BUILD"]
+
+
+          with open(
+              path,
+              "r",
+              encoding="utf-8"
+          ) as f:
+
+              text = f.read()
+
+
+          pattern = (
+              r"(Build_VERSION:\s*)"
+              r"['\"]"
+              r"[0-9]+\.[0-9]+"
+              r"['\"]"
+          )
+
+
+          new_text, count = re.subn(
+              pattern,
+              rf"\g<1>'{new_build}'",
+              text,
+              count=1
+          )
+
+
+          if count != 1:
+
+              raise SystemExit(
+                  "ERROR: Build_VERSION "
+                  "was not found exactly once."
+              )
+
+
+          with open(
+              path,
+              "w",
+              encoding="utf-8",
+              newline="\n"
+          ) as f:
+
+              f.write(new_text)
+
+
+          print(
+              f"Build_VERSION -> {new_build}"
+          )
+
+          PY
+
+
+      # ========================================================
+      # 17. 最终验证
+      # ========================================================
+
+      - name: Final verification
+        if: env.UPDATE_NEEDED == 'true'
+        shell: bash
+        run: |
+
+          set -e
+
+
+          echo "=========================================="
+          echo "Final verification"
+          echo "=========================================="
+
+
+          echo ""
+
+          grep \
+            "Build_VERSION:" \
+            "$WORKFLOW_FILE"
+
+
+          echo ""
+
+          test \
+            -f \
+            "$FILE_NAME/uup_download_windows.cmd"
+
+
+          test \
+            -f \
+            "$FILE_NAME/ConvertConfig.ini"
+
+
+          test \
+            -d \
+            "$FILE_NAME/files"
+
+
+          echo ""
+
+          echo "Final verification PASSED."
+
+
+      # ========================================================
+      # 18. Commit
+      # ========================================================
+
+      - name: Commit changes
+        if: env.UPDATE_NEEDED == 'true'
+        shell: bash
+        run: |
+
+          set -e
+
+
+          git config \
+            user.name \
+            "github-actions[bot]"
+
+
+          git config \
+            user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+
+          git add \
+            "$FILE_NAME"
+
+
+          git add \
+            "$WORKFLOW_FILE"
+
+
+          if git diff --cached --quiet; then
+
+            echo "No changes to commit."
+
+            exit 0
+
+          fi
+
+
+          git commit \
+            -m \
+            "Update Windows 11 Dev amd64 to $LATEST_BUILD"
+
+
+      # ========================================================
+      # 19. Push
+      # ========================================================
+
+      - name: Push repository update
+        if: env.UPDATE_NEEDED == 'true'
+        shell: bash
+        run: |
+
+          set -e
+
+
+          git push \
+            origin \
+            "HEAD:${GITHUB_REF_NAME}"
+
+
+          echo ""
+
+          echo "Repository updated."
+
+
+      # ========================================================
+      # 20. 主动启动 ISO Workflow
+      #
+      # 不能依赖 GITHUB_TOKEN push 自动触发另一个 Workflow。
+      # 使用 GH_PAT 主动 workflow_dispatch。
+      # ========================================================
+
+      - name: Start ISO build workflow
+        if: env.UPDATE_NEEDED == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        shell: bash
+        run: |
+
+          set -e
+
+
+          echo "=========================================="
+          echo "Starting ISO build workflow"
+          echo "=========================================="
+
+
+          if [ -z "$GH_TOKEN" ]; then
+
+            echo "ERROR: GH_PAT secret is not configured."
+
+            echo ""
+            echo "Please create repository secret:"
+            echo "GH_PAT"
+
+            exit 1
+
+          fi
+
+
+          gh workflow run \
+            "Windows11_Insider_Preview_Feature_Update_Dev_amd64.yml" \
+            --ref "${GITHUB_REF_NAME}"
+
+
+          echo ""
+
+          echo "ISO workflow dispatched successfully."
+
+
+      # ========================================================
+      # 21. 完成
+      # ========================================================
+
+      - name: Completed
+        if: env.UPDATE_NEEDED == 'true'
+        shell: bash
+        run: |
+
+          echo "=========================================="
+
+          echo "Windows 11 Dev package update completed."
+
+          echo "Build: $LATEST_BUILD"
+
+          echo "Language: zh-cn"
+
+          echo "Edition: Professional"
+
+          echo "=========================================="
