@@ -50,4 +50,4 @@ jobs:
       with:
         tag_name: ${{env.FILE_NAME}}-${{env.Build_VERSION}}
         release_name: ${{env.FILE_NAME}}-${{env.Build_VERSION}}
-        files: ${{env.FILE_NAME}}-${{env.Build_VERSION}}.7z*
+        files: ${{env.FILE_NAME}}-${{env.Bu
