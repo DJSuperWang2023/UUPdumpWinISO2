@@ -98,20 +98,15 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $arch   = $env:ARCH
-          $ring   = "Dev"
-          $flight = "Mainline"
-          $build  = "latest"
-          $sku    = 48
-          $type   = "Production"
-
+          # IMPORTANT:
+          # The channel is selected ONLY by the UUP API parameters below.
+          # Do not infer the channel from Build, BuildBranch, kernel codename,
+          # or from the largest number inside updateArray.
           $query = @(
-            "arch=$([uri]::EscapeDataString($arch))"
-            "ring=$([uri]::EscapeDataString($ring))"
-            "flight=$([uri]::EscapeDataString($flight))"
-            "build=$([uri]::EscapeDataString($build))"
-            "sku=$sku"
-            "type=$([uri]::EscapeDataString($type))"
+            "arch=$([uri]::EscapeDataString($env:ARCH))"
+            "ring=$([uri]::EscapeDataString('Dev'))"
+            "flight=$([uri]::EscapeDataString('Mainline'))"
+            "build=$([uri]::EscapeDataString('latest'))"
           ) -join "&"
 
           $uri = "$env:UUP_API/fetchupd.php?$query"
@@ -120,14 +115,15 @@ jobs:
           Write-Host "UUP API CHANNEL LOCK"
           Write-Host "=========================================="
           Write-Host "API    : $env:UUP_API"
-          Write-Host "Arch   : $arch"
-          Write-Host "Ring   : $ring (Dev)"
-          Write-Host "Flight : $flight (Mainline)"
+          Write-Host "Arch   : $env:ARCH"
+          Write-Host "Ring   : Dev"
+          Write-Host "Flight : Mainline"
           Write-Host "Build  : NOT LOCKED"
           Write-Host "Min    : $env:MIN_BUILD"
           Write-Host "Branch : NOT LOCKED"
           Write-Host "Kernel : NOT LOCKED"
           Write-Host "=========================================="
+          Write-Host "Request: $uri"
 
           $response = Invoke-RestMethod `
             -Uri $uri `
@@ -142,56 +138,118 @@ jobs:
               throw "UUP API returned an empty response."
           }
 
-          if ($null -ne $response.response) {
+          # UUP API normally wraps the result in response, but keep the
+          # parser tolerant of both wrapped and unwrapped responses.
+          $payload = $response
+          if ($response.PSObject.Properties.Name -contains "response" -and $null -ne $response.response) {
               $payload = $response.response
           }
-          else {
-              $payload = $response
-          }
 
-          if ($payload.PSObject.Properties.Name -contains "error") {
+          if ($payload.PSObject.Properties.Name -contains "error" -and $null -ne $payload.error) {
               throw "UUP API error: $($payload.error)"
           }
 
-          # IMPORTANT:
-          # fetchupd.php returns ONE selected build at the response level.
-          # updateArray is NOT a list of different builds; it contains the
-          # update's component/file entries. Do not sort it by build number.
-          $targetBuild = $null
-          $updateId = $null
-          $updateTitle = $null
+          # ----------------------------------------------------------
+          # IMPORTANT FIX:
+          # fetchupd.php is queried with ring=Dev + flight=Mainline.
+          # The returned updateArray is NOT a list of Builds to sort.
+          # Depending on the API revision it may be a single object or an
+          # array of component/update records. We therefore read the Build
+          # and Update ID from the response first, and only use updateArray
+          # as a fallback for locating the same update.
+          # ----------------------------------------------------------
 
-          if ($payload.PSObject.Properties.Name -contains "foundBuild") {
-              $targetBuild = [string]$payload.foundBuild
+          function Get-FirstPropertyValue {
+              param(
+                  [Parameter(Mandatory=$true)] $Object,
+                  [Parameter(Mandatory=$true)] [string[]] $Names
+              )
+
+              foreach ($name in $Names) {
+                  if ($null -ne $Object -and $Object.PSObject.Properties.Name -contains $name) {
+                      $value = $Object.$name
+                      if ($null -ne $value -and -not [string]::IsNullOrWhiteSpace([string]$value)) {
+                          return [string]$value
+                      }
+                  }
+              }
+
+              return $null
           }
 
-          if ($payload.PSObject.Properties.Name -contains "updateId") {
-              $updateId = [string]$payload.updateId
+          $targetBuild = Get-FirstPropertyValue -Object $payload -Names @(
+            "foundBuild", "build", "updateBuild"
+          )
+
+          $updateId = Get-FirstPropertyValue -Object $payload -Names @(
+            "updateId", "uuid", "id"
+          )
+
+          $updateTitle = Get-FirstPropertyValue -Object $payload -Names @(
+            "updateTitle", "title", "name"
+          )
+
+          # Normalize updateArray/updates/updateInfo into an array only for
+          # fallback extraction. Never sort this collection by Build.
+          $records = @()
+
+          foreach ($propertyName in @("updateArray", "updates", "updateInfo")) {
+              if ($payload.PSObject.Properties.Name -contains $propertyName -and $null -ne $payload.$propertyName) {
+                  $records = @($payload.$propertyName)
+                  break
+              }
           }
 
-          if ($payload.PSObject.Properties.Name -contains "updateTitle") {
-              $updateTitle = [string]$payload.updateTitle
+          # Some API revisions return the useful fields inside the first
+          # record. Use them only if the response-level fields are absent.
+          if ([string]::IsNullOrWhiteSpace($targetBuild) -or [string]::IsNullOrWhiteSpace($updateId)) {
+              foreach ($record in $records) {
+                  if ([string]::IsNullOrWhiteSpace($targetBuild)) {
+                      $targetBuild = Get-FirstPropertyValue -Object $record -Names @(
+                        "foundBuild", "build", "updateBuild"
+                      )
+                  }
+
+                  if ([string]::IsNullOrWhiteSpace($updateId)) {
+                      $updateId = Get-FirstPropertyValue -Object $record -Names @(
+                        "updateId", "uuid", "id"
+                      )
+                  }
+
+                  if ([string]::IsNullOrWhiteSpace($updateTitle)) {
+                      $updateTitle = Get-FirstPropertyValue -Object $record -Names @(
+                        "updateTitle", "title", "name"
+                      )
+                  }
+
+                  if (-not [string]::IsNullOrWhiteSpace($targetBuild) -and
+                      -not [string]::IsNullOrWhiteSpace($updateId)) {
+                      break
+                  }
+              }
           }
 
           if ([string]::IsNullOrWhiteSpace($targetBuild)) {
-              throw "UUP API did not return foundBuild for the locked Dev/Experimental channel."
+              throw "UUP API did not return a Build for ring=Dev / flight=Mainline. See uup-response.json for the raw API response."
           }
 
           if ($targetBuild -notmatch '^\d+\.\d+$') {
-              throw "UUP API returned an invalid build: $targetBuild"
+              throw "UUP API returned an invalid Build: $targetBuild"
           }
 
           $minimumBuild = [version]$env:MIN_BUILD
           $apiBuild = [version]$targetBuild
 
           if ($apiBuild -lt $minimumBuild) {
-              throw "UUP API returned Build $targetBuild, which is below the repository minimum Build $env:MIN_BUILD. Refusing to update."
+              throw "UUP API returned Build $targetBuild, below repository minimum $env:MIN_BUILD. Refusing to update."
           }
 
           if ([string]::IsNullOrWhiteSpace($updateId)) {
-              throw "UUP API did not return updateId for the locked Dev/Experimental channel."
+              throw "UUP API did not return an Update ID for the Dev/Experimental update. See uup-response.json."
           }
 
+          # Accept the normal UUID and the optional _rev.N suffix used by
+          # UUP identifiers. Do not derive the ID from Build or branch names.
           if ($updateId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:_rev\.\d+)?$') {
               throw "UUP API returned an invalid Update ID: $updateId"
           }
@@ -200,61 +258,37 @@ jobs:
               $updateTitle = "Windows 11 Insider Preview $targetBuild"
           }
 
-          # Verify the returned update belongs to the requested Dev/WIF
-          # channel when the API exposes per-entry metadata. This is a
-          # CHANNEL check, not a BuildBranch/kernel check.
-          $channelEntries = @()
-
-          if ($null -ne $payload.updateArray) {
-              $channelEntries = @($payload.updateArray) |
-                Where-Object {
-                    ($_.PSObject.Properties.Name -contains "ring") -and
-                    ([string]$_.ring).ToUpperInvariant() -eq "WIF"
-                }
+          # Optional metadata validation. If the API exposes a channel/ring
+          # field, reject an explicit non-Dev/Experimental result. If the
+          # field is absent, do NOT fail: ring=Dev in the API request is the
+          # actual channel selector and some API responses omit this field.
+          $metadataValues = @()
+          foreach ($object in @($payload) + $records) {
+              foreach ($propertyName in @("ring", "channel", "flight")) {
+                  if ($object.PSObject.Properties.Name -contains $propertyName) {
+                      $value = [string]$object.$propertyName
+                      if (-not [string]::IsNullOrWhiteSpace($value)) {
+                          $metadataValues += $value
+                      }
+                  }
+              }
           }
 
-          if ($channelEntries.Count -eq 0) {
-              throw "UUP API response did not contain a WIF/Dev channel entry. Refusing to continue."
+          $metadataValues = @($metadataValues | Select-Object -Unique)
+
+          foreach ($value in $metadataValues) {
+              $upper = $value.ToUpperInvariant()
+              if ($upper -match 'CANARY|BETA|RELEASE\s*PREVIEW|RP|FUTURE') {
+                  throw "UUP API metadata explicitly indicates a non-Dev channel ($value). Refusing to update."
+              }
           }
-
-          $matchedChannelEntry = $channelEntries |
-            Where-Object {
-                ($_.PSObject.Properties.Name -contains "updateId") -and
-                ([string]$_.updateId) -eq $updateId
-            } |
-            Select-Object -First 1
-
-          if ($null -eq $matchedChannelEntry) {
-              # Some API versions expose the UUID only at the top level.
-              # The WIF entry itself is still enough to validate the channel.
-              $matchedChannelEntry = $channelEntries | Select-Object -First 1
-          }
-
-          if ($null -eq $matchedChannelEntry) {
-              throw "Unable to verify the returned update as Dev/WIF."
-          }
-
-          $returnedRing = [string]$matchedChannelEntry.ring
-          $returnedFlight = ""
-
-          if ($matchedChannelEntry.PSObject.Properties.Name -contains "flight") {
-              $returnedFlight = [string]$matchedChannelEntry.flight
-          }
-
-          if ($returnedRing.ToUpperInvariant() -ne "WIF") {
-              throw "Unexpected UUP channel returned: $returnedRing"
-          }
-
-          # UUP API internally normalizes Mainline to Active in the
-          # returned metadata, so Flight is informational here. The actual
-          # channel lock is Dev/WIF; no BuildBranch/kernel lock is applied.
 
           Write-Host ""
           Write-Host "=========================================="
           Write-Host "SELECTED UPDATE"
           Write-Host "=========================================="
           Write-Host "Channel : Windows 11 Experimental"
-          Write-Host "Ring    : Dev / WIF"
+          Write-Host "Ring    : Dev"
           Write-Host "Flight  : Mainline"
           Write-Host "Build   : $targetBuild"
           Write-Host "Minimum : $env:MIN_BUILD"
@@ -312,9 +346,16 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           $build = $env:TARGET_BUILD
-          $uri = "$env:UUP_API/fetchupd.php?arch=$env:ARCH&ring=$env:RING&flight=$env:FLIGHT&build=$build&sku=48&type=Production"
+          $query = @(
+            "arch=$([uri]::EscapeDataString($env:ARCH))"
+            "ring=$([uri]::EscapeDataString('Dev'))"
+            "flight=$([uri]::EscapeDataString('Mainline'))"
+            "build=$([uri]::EscapeDataString($build))"
+          ) -join "&"
 
-          Write-Host "Verifying exact Build through UUP API: $build"
+          $uri = "$env:UUP_API/fetchupd.php?$query"
+
+          Write-Host "Verifying exact Dev/Experimental Build through UUP API: $build"
 
           $response = Invoke-RestMethod `
             -Uri $uri `
@@ -325,29 +366,76 @@ jobs:
             ConvertTo-Json -Depth 100 |
             Out-File -FilePath "uup-response-verify.json" -Encoding utf8
 
-          if ($null -eq $response.response) {
-              throw "UUP API verification response is missing the response object."
+          if ($null -eq $response) {
+              throw "UUP API verification returned an empty response."
           }
 
-          $payload = $response.response
+          $payload = $response
+          if ($response.PSObject.Properties.Name -contains "response" -and $null -ne $response.response) {
+              $payload = $response.response
+          }
 
-          if ($payload.PSObject.Properties.Name -contains "error") {
+          if ($payload.PSObject.Properties.Name -contains "error" -and $null -ne $payload.error) {
               throw "UUP API verification error: $($payload.error)"
           }
 
-          $verifiedBuild = [string]$payload.foundBuild
-          $verifiedId = [string]$payload.updateId
+          function Get-FirstPropertyValue {
+              param(
+                  [Parameter(Mandatory=$true)] $Object,
+                  [Parameter(Mandatory=$true)] [string[]] $Names
+              )
+
+              foreach ($name in $Names) {
+                  if ($null -ne $Object -and $Object.PSObject.Properties.Name -contains $name) {
+                      $value = $Object.$name
+                      if ($null -ne $value -and -not [string]::IsNullOrWhiteSpace([string]$value)) {
+                          return [string]$value
+                      }
+                  }
+              }
+
+              return $null
+          }
+
+          $verifiedBuild = Get-FirstPropertyValue -Object $payload -Names @(
+            "foundBuild", "build", "updateBuild"
+          )
+
+          $verifiedId = Get-FirstPropertyValue -Object $payload -Names @(
+            "updateId", "uuid", "id"
+          )
+
+          $records = @()
+          foreach ($propertyName in @("updateArray", "updates", "updateInfo")) {
+              if ($payload.PSObject.Properties.Name -contains $propertyName -and $null -ne $payload.$propertyName) {
+                  $records = @($payload.$propertyName)
+                  break
+              }
+          }
+
+          foreach ($record in $records) {
+              if ([string]::IsNullOrWhiteSpace($verifiedBuild)) {
+                  $verifiedBuild = Get-FirstPropertyValue -Object $record -Names @(
+                    "foundBuild", "build", "updateBuild"
+                  )
+              }
+              if ([string]::IsNullOrWhiteSpace($verifiedId)) {
+                  $verifiedId = Get-FirstPropertyValue -Object $record -Names @(
+                    "updateId", "uuid", "id"
+                  )
+              }
+              if (-not [string]::IsNullOrWhiteSpace($verifiedBuild) -and
+                  -not [string]::IsNullOrWhiteSpace($verifiedId)) {
+                  break
+              }
+          }
 
           if ($verifiedBuild -ne $build) {
               throw "UUP API verification mismatch. Requested: $build ; Returned: $verifiedBuild"
           }
 
-          if ($verifiedBuild -notmatch '^\d+\.\d+$') {
-              throw "UUP API verification returned an invalid Build: $verifiedBuild"
-          }
-
           if ([version]$verifiedBuild -lt [version]$env:MIN_BUILD) {
-              throw "UUP API verification returned Build $verifiedBuild below the repository minimum $env:MIN_BUILD."
+              throw "UUP API verification returned Build $verifiedBuild below repository minimum $env:MIN_BUILD."
           }
 
           if ([string]::IsNullOrWhiteSpace($verifiedId)) {
@@ -358,25 +446,32 @@ jobs:
               throw "UUP API verification returned an invalid Update ID: $verifiedId"
           }
 
-          # Verify the response still belongs to Dev/WIF. This locks the
-          # channel only; BuildBranch/kernel codename remain unrestricted.
-          $wifEntries = @()
-
-          if ($null -ne $payload.updateArray) {
-              $wifEntries = @($payload.updateArray) |
-                Where-Object {
-                    ($_.PSObject.Properties.Name -contains "ring") -and
-                    ([string]$_.ring).ToUpperInvariant() -eq "WIF"
-                }
+          # Only reject an explicitly reported non-Dev channel. Do not
+          # require a ring/flight field because some API responses omit it.
+          $metadataValues = @()
+          foreach ($object in @($payload) + $records) {
+              foreach ($propertyName in @("ring", "channel", "flight")) {
+                  if ($object.PSObject.Properties.Name -contains $propertyName) {
+                      $value = [string]$object.$propertyName
+                      if (-not [string]::IsNullOrWhiteSpace($value)) {
+                          $metadataValues += $value
+                      }
+                  }
+              }
           }
 
-          if ($wifEntries.Count -eq 0) {
-              throw "UUP API verification did not return a Dev/WIF entry."
+          foreach ($value in @($metadataValues | Select-Object -Unique)) {
+              $upper = $value.ToUpperInvariant()
+              if ($upper -match 'CANARY|BETA|RELEASE\s*PREVIEW|RP|FUTURE') {
+                  throw "UUP API verification explicitly indicates a non-Dev channel ($value). Refusing to continue."
+              }
           }
 
-          Write-Host "Verified Build : $verifiedBuild"
+          Write-Host "Verified Build  : $verifiedBuild"
           Write-Host "Verified UpdateID: $verifiedId"
-          Write-Host "Verified Channel: Dev / WIF"
+          Write-Host "Verified Channel : Windows 11 Experimental / Dev"
+          Write-Host "Branch           : NOT LOCKED"
+          Write-Host "Kernel           : NOT LOCKED"
 
           Add-Content -Path $env:GITHUB_ENV -Value "UUP_UPDATE_ID=$verifiedId"
 
@@ -789,7 +884,7 @@ jobs:
           Write-Host "NO UPDATE"
           Write-Host "=========================================="
           Write-Host "Current Build: $env:CURRENT_BUILD"
-          Write-Host "Microsoft Build: $env:TARGET_BUILD"
+          Write-Host "Dev Build: $env:TARGET_BUILD"
           Write-Host "No repository changes were made."
 
       # ============================================================
