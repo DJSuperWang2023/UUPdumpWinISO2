@@ -1,170 +1,53 @@
 name: Windows11_Insider_Preview_Feature_Update_Dev_amd64
 
-on:
-  # 手动运行
-  workflow_dispatch:
-
-  # update-dev-build.yml 更新仓库后，
-  # 第一个 Workflow 会使用 GH_PAT 主动调用本 Workflow。
-  #
-  # 这里不使用 push 自动触发，
-  # 因为 GITHUB_TOKEN 产生的 push 不会自动触发新的 Workflow。
-
-permissions:
-  contents: write
+on: workflow_dispatch
+#on: [push, pull_request]
 
 env:
   Build_VERSION: '26340.9233'
   FILE_NAME: Windows11_Insider_Preview_Feature_Update_Dev_amd64
 
-
 jobs:
-
   Windows11_Insider_Preview_Feature_Update_Dev_amd64:
-
     runs-on: windows-latest
 
     steps:
 
-      # ========================================================
-      # 1. Checkout
-      # ========================================================
+    # 检出本仓库
+    - name: Checkout repository
+      uses: actions/checkout@v5
 
-      - name: Checkout repository
-        uses: actions/checkout@v5
+    # 制作ISO
+    - name: UUP dump WinISO
+      shell: cmd
+      run: |
+        cd ${{env.FILE_NAME}}
+        dir
+        uup_download_windows.cmd
 
+    # 查看目录
+    - name: dir dir
+      shell: cmd
+      run: |
+        cd ${{env.FILE_NAME}}
+        dir
 
-      # ========================================================
-      # 2. 显示目录
-      # ========================================================
+    # 打包
+    - name: Package binaries
+      run: |
+        #ls     #Directory: D:\a\UUPdumpWinISO\UUPdumpWinISO(即仓库目录)
+        7z a -v1950M ${{env.FILE_NAME}}-${{env.Build_VERSION}}.7z ./${{env.FILE_NAME}}/*.iso -mx=9
 
-      - name: Check UUP package
-        shell: cmd
-        run: |
+    # 上传镜像
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ${{env.FILE_NAME}}-${{env.Build_VERSION}}
+        path: ${{env.FILE_NAME}}-${{env.Build_VERSION}}.7z*
 
-          cd %FILE_NAME%
-
-          echo ==========================================
-          echo UUP package
-          echo ==========================================
-
-          dir
-
-          echo.
-
-          echo files directory:
-
-          dir files
-
-
-      # ========================================================
-      # 3. 制作 ISO
-      # ========================================================
-
-      - name: UUP dump WinISO
-        shell: cmd
-        run: |
-
-          cd %FILE_NAME%
-
-          echo ==========================================
-          echo Build Windows 11 ISO
-          echo ==========================================
-
-          echo Build:
-          echo %Build_VERSION%
-
-          echo.
-
-          uup_download_windows.cmd
-
-
-      # ========================================================
-      # 4. 查看 ISO
-      # ========================================================
-
-      - name: Check generated ISO
-        shell: cmd
-        run: |
-
-          cd %FILE_NAME%
-
-          echo ==========================================
-          echo Generated files
-          echo ==========================================
-
-          dir
-
-          echo.
-
-          echo ISO files:
-
-          dir *.iso
-
-
-      # ========================================================
-      # 5. 打包 ISO
-      #
-      # 每个分卷约 1950 MB
-      # ========================================================
-
-      - name: Package binaries
-        shell: bash
-        run: |
-
-          set -e
-
-          echo "=========================================="
-
-          echo "Package ISO"
-
-          echo "=========================================="
-
-
-          7z a \
-            -v1950M \
-            "${FILE_NAME}-${Build_VERSION}.7z" \
-            "./${FILE_NAME}/*.iso" \
-            -mx=9
-
-
-          echo ""
-
-          echo "Package result:"
-
-          ls -lh \
-            "${FILE_NAME}-${Build_VERSION}.7z"*
-
-
-      # ========================================================
-      # 6. 上传 Artifact
-      # ========================================================
-
-      - name: Upload ISO artifact
-        uses: actions/upload-artifact@v4
-        with:
-
-          name: ${{ env.FILE_NAME }}-${{ env.Build_VERSION }}
-
-          path: ${{ env.FILE_NAME }}-${{ env.Build_VERSION }}.7z*
-
-          if-no-files-found: error
-
-
-      # ========================================================
-      # 7. 发布 GitHub Release
-      # ========================================================
-
-      - name: Release
-        uses: softprops/action-gh-release@v2
-        with:
-
-          tag_name: ${{ env.FILE_NAME }}-${{ env.Build_VERSION }}
-
-          name: ${{ env.FILE_NAME }}-${{ env.Build_VERSION }}
-
-          files: |
-            ${{ env.FILE_NAME }}-${{ env.Build_VERSION }}.7z*
-
-          generate_release_notes: false
-
+    # 发布镜像
+    - name: Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{env.FILE_NAME}}-${{env.Build_VERSION}}
+        release_name: ${{env.FILE_NAME}}-${{env.Build_VERSION}}
+        files: ${{env.FILE_NAME}}-${{env.Build_VERSION}}.7z*
