@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 env:
-  Build_VERSION: '29648.1000'
+  Build_VERSION: '26340.9233'
   FILE_NAME: Windows11_Insider_Preview_Feature_Update_Dev_amd64
 
 
