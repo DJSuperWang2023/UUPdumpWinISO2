@@ -16,6 +16,9 @@ permissions:
 env:
   UUP_API: 'https://api.uupdump.net'
   ARCH: 'amd64'
+  RING: 'Dev'
+  FLIGHT: 'Mainline'
+  MIN_BUILD: '26340.9233'
   LANGUAGE: 'zh-cn'
   EDITION: 'professional'
   FILE_NAME: 'Windows11_Insider_Preview_Feature_Update_Dev_amd64'
@@ -72,39 +75,59 @@ jobs:
 
           Add-Content -Path $env:GITHUB_ENV -Value "CURRENT_BUILD=$currentBuild"
 
-      # ============================================================      # ============================================================
+      # ============================================================
       # 3. Query UUP API only
-      #
+      # ============================================================
       # IMPORTANT:
-      # - The update channel is hard-locked to Windows 11 Experimental
-      #   (UUP API: Ring=Dev, Flight=Mainline).
-      # - This is NOT 26H1, NOT a future platform, and NOT Beta/RP.
-      # - Only the update channel is locked.
-      # - Do NOT lock BuildBranch / kernel codename such as ge_prerelease.
-      #   Build number, branch and other internal identifiers are expected
-      #   to change as the Experimental channel evolves.
+      # - Only query UUP API. No Microsoft release-notes page is used.
+      # - Lock ONLY the Windows 11 Experimental / Dev channel.
+      # - UUP API ring=Dev is the channel selector; do NOT select by the
+      #   highest Build number returned from unrelated channels.
+      # - The repository minimum accepted Build is 26340.9233.
+      # - Do NOT lock Build, BuildBranch, kernel codename, or any internal
+      #   branch name. Those values are allowed to change over time.
+      # - The API response's top-level foundBuild/updateId/updateTitle are
+      #   authoritative. updateArray contains component/file information and
+      #   must NOT be treated as a list of different builds.
+      # - This prevents a higher Canary/Future Platforms build from being
+      #   selected merely because its number is larger.
       # ============================================================
 
-      - name: Query UUP API for Experimental channel
+      - name: Query UUP API for Windows 11 Experimental channel
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          # Channel lock: Windows 11 Experimental / Dev Mainline.
-          # Do not add BuildBranch filtering here.
-          $arch  = $env:ARCH
-          $ring  = "Dev"
+          $arch   = $env:ARCH
+          $ring   = "Dev"
           $flight = "Mainline"
+          $build  = "latest"
+          $sku    = 48
+          $type   = "Production"
 
-          $uri = "$env:UUP_API/fetchupd.php?arch=$([uri]::EscapeDataString($arch))&ring=$([uri]::EscapeDataString($ring))&flight=$([uri]::EscapeDataString($flight))"
+          $query = @(
+            "arch=$([uri]::EscapeDataString($arch))"
+            "ring=$([uri]::EscapeDataString($ring))"
+            "flight=$([uri]::EscapeDataString($flight))"
+            "build=$([uri]::EscapeDataString($build))"
+            "sku=$sku"
+            "type=$([uri]::EscapeDataString($type))"
+          ) -join "&"
 
-          Write-Host "UUP API channel query:"
-          Write-Host "API  : $env:UUP_API"
-          Write-Host "Arch : $arch"
-          Write-Host "Ring : $ring"
-          Write-Host "Flight: $flight"
-          Write-Host "BuildBranch: NOT LOCKED"
-          Write-Host "Kernel codename: NOT LOCKED"
+          $uri = "$env:UUP_API/fetchupd.php?$query"
+
+          Write-Host "=========================================="
+          Write-Host "UUP API CHANNEL LOCK"
+          Write-Host "=========================================="
+          Write-Host "API    : $env:UUP_API"
+          Write-Host "Arch   : $arch"
+          Write-Host "Ring   : $ring (Dev)"
+          Write-Host "Flight : $flight (Mainline)"
+          Write-Host "Build  : NOT LOCKED"
+          Write-Host "Min    : $env:MIN_BUILD"
+          Write-Host "Branch : NOT LOCKED"
+          Write-Host "Kernel : NOT LOCKED"
+          Write-Host "=========================================="
 
           $response = Invoke-RestMethod `
             -Uri $uri `
@@ -126,165 +149,124 @@ jobs:
               $payload = $response
           }
 
-          $updates = $null
-
-          foreach ($property in @(
-              "updateArray",
-              "updates",
-              "updateInfo",
-              "builds"
-          )) {
-              if ($payload.PSObject.Properties.Name -contains $property) {
-                  $candidate = @($payload.$property)
-
-                  if ($candidate.Count -gt 0) {
-                      $updates = $candidate
-                      break
-                  }
-              }
+          if ($payload.PSObject.Properties.Name -contains "error") {
+              throw "UUP API error: $($payload.error)"
           }
 
-          if ($null -eq $updates -or $updates.Count -eq 0) {
-              throw "UUP API returned no builds for the locked Experimental channel."
-          }
-
-          function Get-PropertyValue {
-              param(
-                  [Parameter(Mandatory = $true)]
-                  $Object,
-
-                  [Parameter(Mandatory = $true)]
-                  [string[]]$Names
-              )
-
-              foreach ($name in $Names) {
-                  if ($Object.PSObject.Properties.Name -contains $name) {
-                      $value = $Object.$name
-
-                      if ($null -ne $value -and -not [string]::IsNullOrWhiteSpace([string]$value)) {
-                          return [string]$value
-                      }
-                  }
-              }
-
-              return $null
-          }
-
-          $builds = @()
-
-          foreach ($item in $updates) {
-              $buildText = Get-PropertyValue -Object $item -Names @(
-                  "foundBuild",
-                  "build",
-                  "updateBuild",
-                  "buildNumber",
-                  "buildVersion"
-              )
-
-              if ([string]::IsNullOrWhiteSpace($buildText)) {
-                  continue
-              }
-
-              $buildMatch = [regex]::Match($buildText, '^\s*(\d+)\.(\d+)(?:\.(\d+))?')
-
-              if (-not $buildMatch.Success) {
-                  continue
-              }
-
-              $major = [int64]$buildMatch.Groups[1].Value
-              $minor = [int64]$buildMatch.Groups[2].Value
-              $build = "$major.$minor"
-
-              $builds += [PSCustomObject]@{
-                  Build = $build
-                  Major = $major
-                  Minor = $minor
-                  RawBuild = $buildText
-                  Item = $item
-              }
-          }
-
-          if ($builds.Count -eq 0) {
-              throw "UUP API returned data, but no valid Windows build number was found."
-          }
-
-          $target = $builds |
-              Sort-Object `
-                @{Expression = "Major"; Descending = $true},
-                @{Expression = "Minor"; Descending = $true} |
-              Select-Object -First 1
-
-          if ($null -eq $target) {
-              throw "Unable to determine the newest build from UUP API."
-          }
-
-          $matched = @(
-              $builds |
-              Where-Object { $_.Build -eq $target.Build }
-          )
-
-          if ($matched.Count -eq 0) {
-              throw "The selected build was not present in the UUP API result."
-          }
-
+          # IMPORTANT:
+          # fetchupd.php returns ONE selected build at the response level.
+          # updateArray is NOT a list of different builds; it contains the
+          # update's component/file entries. Do not sort it by build number.
+          $targetBuild = $null
           $updateId = $null
+          $updateTitle = $null
 
-          foreach ($entry in $matched) {
-              foreach ($property in @(
-                  "updateId",
-                  "uuid",
-                  "id"
-              )) {
-                  if ($entry.Item.PSObject.Properties.Name -contains $property) {
-                      $candidate = [string]$entry.Item.$property
-
-                      if ($candidate -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}') {
-                          $updateId = $candidate
-                          break
-                      }
-                  }
-              }
-
-              if ($updateId) {
-                  break
-              }
+          if ($payload.PSObject.Properties.Name -contains "foundBuild") {
+              $targetBuild = [string]$payload.foundBuild
           }
 
-          # Some UUP API responses expose updateId in nested update data.
-          if (-not $updateId) {
-              foreach ($entry in $matched) {
-                  $json = $entry.Item | ConvertTo-Json -Depth 100
-
-                  $idMatch = [regex]::Match(
-                      $json,
-                      '(?i)"(?:updateId|uuid|id)"\s*:\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"'
-                  )
-
-                  if ($idMatch.Success) {
-                      $updateId = $idMatch.Groups[1].Value
-                      break
-                  }
-              }
+          if ($payload.PSObject.Properties.Name -contains "updateId") {
+              $updateId = [string]$payload.updateId
           }
 
-          if (-not $updateId) {
-              throw "UUP API returned build $($target.Build), but no Update ID was found."
+          if ($payload.PSObject.Properties.Name -contains "updateTitle") {
+              $updateTitle = [string]$payload.updateTitle
           }
+
+          if ([string]::IsNullOrWhiteSpace($targetBuild)) {
+              throw "UUP API did not return foundBuild for the locked Dev/Experimental channel."
+          }
+
+          if ($targetBuild -notmatch '^\d+\.\d+$') {
+              throw "UUP API returned an invalid build: $targetBuild"
+          }
+
+          $minimumBuild = [version]$env:MIN_BUILD
+          $apiBuild = [version]$targetBuild
+
+          if ($apiBuild -lt $minimumBuild) {
+              throw "UUP API returned Build $targetBuild, which is below the repository minimum Build $env:MIN_BUILD. Refusing to update."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($updateId)) {
+              throw "UUP API did not return updateId for the locked Dev/Experimental channel."
+          }
+
+          if ($updateId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:_rev\.\d+)?$') {
+              throw "UUP API returned an invalid Update ID: $updateId"
+          }
+
+          if ([string]::IsNullOrWhiteSpace($updateTitle)) {
+              $updateTitle = "Windows 11 Insider Preview $targetBuild"
+          }
+
+          # Verify the returned update belongs to the requested Dev/WIF
+          # channel when the API exposes per-entry metadata. This is a
+          # CHANNEL check, not a BuildBranch/kernel check.
+          $channelEntries = @()
+
+          if ($null -ne $payload.updateArray) {
+              $channelEntries = @($payload.updateArray) |
+                Where-Object {
+                    ($_.PSObject.Properties.Name -contains "ring") -and
+                    ([string]$_.ring).ToUpperInvariant() -eq "WIF"
+                }
+          }
+
+          if ($channelEntries.Count -eq 0) {
+              throw "UUP API response did not contain a WIF/Dev channel entry. Refusing to continue."
+          }
+
+          $matchedChannelEntry = $channelEntries |
+            Where-Object {
+                ($_.PSObject.Properties.Name -contains "updateId") -and
+                ([string]$_.updateId) -eq $updateId
+            } |
+            Select-Object -First 1
+
+          if ($null -eq $matchedChannelEntry) {
+              # Some API versions expose the UUID only at the top level.
+              # The WIF entry itself is still enough to validate the channel.
+              $matchedChannelEntry = $channelEntries | Select-Object -First 1
+          }
+
+          if ($null -eq $matchedChannelEntry) {
+              throw "Unable to verify the returned update as Dev/WIF."
+          }
+
+          $returnedRing = [string]$matchedChannelEntry.ring
+          $returnedFlight = ""
+
+          if ($matchedChannelEntry.PSObject.Properties.Name -contains "flight") {
+              $returnedFlight = [string]$matchedChannelEntry.flight
+          }
+
+          if ($returnedRing.ToUpperInvariant() -ne "WIF") {
+              throw "Unexpected UUP channel returned: $returnedRing"
+          }
+
+          # UUP API internally normalizes Mainline to Active in the
+          # returned metadata, so Flight is informational here. The actual
+          # channel lock is Dev/WIF; no BuildBranch/kernel lock is applied.
 
           Write-Host ""
           Write-Host "=========================================="
-          Write-Host "LOCKED UPDATE CHANNEL"
+          Write-Host "SELECTED UPDATE"
           Write-Host "=========================================="
           Write-Host "Channel : Windows 11 Experimental"
-          Write-Host "Ring    : Dev"
+          Write-Host "Ring    : Dev / WIF"
           Write-Host "Flight  : Mainline"
-          Write-Host "Build   : $($target.Build)"
+          Write-Host "Build   : $targetBuild"
+          Write-Host "Minimum : $env:MIN_BUILD"
+          Write-Host "Title   : $updateTitle"
           Write-Host "UpdateID: $updateId"
-          Write-Host "BuildBranch / kernel codename: NOT LOCKED"
+          Write-Host "Branch  : NOT LOCKED"
+          Write-Host "Kernel  : NOT LOCKED"
           Write-Host "=========================================="
 
-          Add-Content -Path $env:GITHUB_ENV -Value "TARGET_BUILD=$($target.Build)"
+          Add-Content -Path $env:GITHUB_ENV -Value "TARGET_BUILD=$targetBuild"
           Add-Content -Path $env:GITHUB_ENV -Value "UUP_UPDATE_ID=$updateId"
+          Add-Content -Path $env:GITHUB_ENV -Value "UPDATE_TITLE=$updateTitle"
           Add-Content -Path $env:GITHUB_ENV -Value "UPDATE_CHANNEL=Windows 11 Experimental"
           Add-Content -Path $env:GITHUB_ENV -Value "UPDATE_RING=Dev"
           Add-Content -Path $env:GITHUB_ENV -Value "UPDATE_FLIGHT=Mainline"
@@ -300,12 +282,15 @@ jobs:
 
           $current = [version]$env:CURRENT_BUILD
           $target = [version]$env:TARGET_BUILD
+          $minimum = [version]$env:MIN_BUILD
 
           Write-Host "Current Build: $current"
           Write-Host "Target Build : $target"
-          Write-Host "Channel      : $env:UPDATE_CHANNEL"
-          Write-Host "Ring         : $env:UPDATE_RING"
-          Write-Host "Flight       : $env:UPDATE_FLIGHT"
+          Write-Host "Minimum Build: $minimum"
+
+          if ($target -lt $minimum) {
+              throw "Target Build $target is below the repository minimum $minimum."
+          }
 
           if ($target -le $current) {
               Write-Host "No update required."
@@ -313,11 +298,90 @@ jobs:
               exit 0
           }
 
-          Write-Host "New Experimental channel Build detected."
+          Write-Host "New Build detected."
           Add-Content -Path $env:GITHUB_ENV -Value "UPDATE_AVAILABLE=true"
 
       # ============================================================
-      # 5. Prepare temporary directory
+      # 5. Verify exact Build with UUP API
+      # ============================================================
+
+      - name: Verify exact Build with UUP API
+        if: env.UPDATE_AVAILABLE == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $build = $env:TARGET_BUILD
+          $uri = "$env:UUP_API/fetchupd.php?arch=$env:ARCH&ring=$env:RING&flight=$env:FLIGHT&build=$build&sku=48&type=Production"
+
+          Write-Host "Verifying exact Build through UUP API: $build"
+
+          $response = Invoke-RestMethod `
+            -Uri $uri `
+            -Method Get `
+            -TimeoutSec 120
+
+          $response |
+            ConvertTo-Json -Depth 100 |
+            Out-File -FilePath "uup-response-verify.json" -Encoding utf8
+
+          if ($null -eq $response.response) {
+              throw "UUP API verification response is missing the response object."
+          }
+
+          $payload = $response.response
+
+          if ($payload.PSObject.Properties.Name -contains "error") {
+              throw "UUP API verification error: $($payload.error)"
+          }
+
+          $verifiedBuild = [string]$payload.foundBuild
+          $verifiedId = [string]$payload.updateId
+
+          if ($verifiedBuild -ne $build) {
+              throw "UUP API verification mismatch. Requested: $build ; Returned: $verifiedBuild"
+          }
+
+          if ($verifiedBuild -notmatch '^\d+\.\d+$') {
+              throw "UUP API verification returned an invalid Build: $verifiedBuild"
+          }
+
+          if ([version]$verifiedBuild -lt [version]$env:MIN_BUILD) {
+              throw "UUP API verification returned Build $verifiedBuild below the repository minimum $env:MIN_BUILD."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($verifiedId)) {
+              throw "UUP API verification returned no Update ID."
+          }
+
+          if ($verifiedId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:_rev\.\d+)?$') {
+              throw "UUP API verification returned an invalid Update ID: $verifiedId"
+          }
+
+          # Verify the response still belongs to Dev/WIF. This locks the
+          # channel only; BuildBranch/kernel codename remain unrestricted.
+          $wifEntries = @()
+
+          if ($null -ne $payload.updateArray) {
+              $wifEntries = @($payload.updateArray) |
+                Where-Object {
+                    ($_.PSObject.Properties.Name -contains "ring") -and
+                    ([string]$_.ring).ToUpperInvariant() -eq "WIF"
+                }
+          }
+
+          if ($wifEntries.Count -eq 0) {
+              throw "UUP API verification did not return a Dev/WIF entry."
+          }
+
+          Write-Host "Verified Build : $verifiedBuild"
+          Write-Host "Verified UpdateID: $verifiedId"
+          Write-Host "Verified Channel: Dev / WIF"
+
+          Add-Content -Path $env:GITHUB_ENV -Value "UUP_UPDATE_ID=$verifiedId"
+
+      # ============================================================
+      # 6. Prepare temporary directory
       # ============================================================
 
       - name: Prepare temporary directory
@@ -339,7 +403,7 @@ jobs:
             Out-Null
 
       # ============================================================
-      # 6. Download UUP conversion package
+      # 7. Download UUP conversion package
       # ============================================================
 
       - name: Download UUP conversion package
@@ -418,7 +482,7 @@ jobs:
           Write-Host "UUP package downloaded successfully."
 
       # ============================================================
-      # 7. Extract UUP conversion package
+      # 8. Extract UUP package
       # ============================================================
 
       - name: Extract UUP conversion package
@@ -450,7 +514,7 @@ jobs:
           Write-Host "UUP package extracted."
 
       # ============================================================
-      # 8. Find UUP root
+      # 9. Find UUP root
       # ============================================================
 
       - name: Normalize UUP package
@@ -492,7 +556,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "UUP_SOURCE=$source"
 
       # ============================================================
-      # 9. Verify UUP configuration
+      # 10. Verify configuration
       # ============================================================
 
       - name: Verify UUP configuration
@@ -530,7 +594,7 @@ jobs:
           }
 
       # ============================================================
-      # 10. Replace UUP directory
+      # 11. Replace UUP directory
       # ============================================================
 
       - name: Replace entire UUP directory
@@ -566,7 +630,7 @@ jobs:
           Write-Host "UUP directory replaced successfully."
 
       # ============================================================
-      # 11. Update ISO workflow Build_VERSION
+      # 12. Update ISO workflow Build_VERSION
       # ============================================================
 
       - name: Update ISO workflow Build_VERSION
@@ -605,7 +669,7 @@ jobs:
           Write-Host "Build_VERSION updated to $env:TARGET_BUILD"
 
       # ============================================================
-      # 12. Create update information
+      # 13. Create update information
       # ============================================================
 
       - name: Create update information
@@ -615,13 +679,14 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           $info = [ordered]@{
-            Channel = "Windows 11 Experimental"
-            Ring = "Dev"
-            Flight = "Mainline"
-            Architecture = $env:ARCH
-            Language = $env:LANGUAGE
-            Edition = $env:EDITION
+            Channel = "Experimental"
+            Ring = $env:UPDATE_RING
+            Flight = $env:UPDATE_FLIGHT
+            Architecture = "amd64"
+            Language = "zh-cn"
+            Edition = "professional"
             Build = $env:TARGET_BUILD
+            MinimumBuild = $env:MIN_BUILD
             PreviousBuild = $env:CURRENT_BUILD
             UUPUpdateID = $env:UUP_UPDATE_ID
             UpdatedAt = (Get-Date).ToUniversalTime().ToString("o")
@@ -636,7 +701,7 @@ jobs:
           Get-Content -LiteralPath "dev-build-info.json"
 
       # ============================================================
-      # 13. Git status
+      # 14. Git status
       # ============================================================
 
       - name: Stage repository changes
@@ -655,7 +720,7 @@ jobs:
           git diff --cached --stat
 
       # ============================================================
-      # 14. Commit and push
+      # 15. Commit and push
       # ============================================================
 
       - name: Commit repository changes
@@ -688,7 +753,7 @@ jobs:
           Write-Host "Repository pushed successfully."
 
       # ============================================================
-      # 15. Trigger ISO workflow
+      # 16. Trigger ISO workflow
       # ============================================================
 
       - name: Trigger ISO workflow
@@ -713,7 +778,7 @@ jobs:
           Write-Host "ISO workflow triggered successfully."
 
       # ============================================================
-      # 16. No update
+      # 17. No update
       # ============================================================
 
       - name: No update summary
@@ -723,15 +788,12 @@ jobs:
           Write-Host "=========================================="
           Write-Host "NO UPDATE"
           Write-Host "=========================================="
-          Write-Host "Current Build : $env:CURRENT_BUILD"
-          Write-Host "UUP Build     : $env:TARGET_BUILD"
-          Write-Host "Channel       : $env:UPDATE_CHANNEL"
-          Write-Host "Ring          : $env:UPDATE_RING"
-          Write-Host "Flight        : $env:UPDATE_FLIGHT"
+          Write-Host "Current Build: $env:CURRENT_BUILD"
+          Write-Host "Microsoft Build: $env:TARGET_BUILD"
           Write-Host "No repository changes were made."
 
       # ============================================================
-      # 17. Completed
+      # 18. Completed
       # ============================================================
 
       - name: Completed
