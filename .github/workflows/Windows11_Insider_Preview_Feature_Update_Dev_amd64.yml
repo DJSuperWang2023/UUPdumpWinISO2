@@ -1,4 +1,4 @@
-name: Windows11_Insider_Preview_Feature_Update_Dev_amd64
+name: Windows11_26340.9354_Insider_Preview_Feature_Update_Dev_amd64
 
 on: workflow_dispatch
 #on: [push, pull_request]
@@ -8,7 +8,7 @@ env:
   FILE_NAME: Windows11_Insider_Preview_Feature_Update_Dev_amd64
 
 jobs:
-  Windows11_Insider_Preview_Feature_Update_Dev_amd64:
+  Windows11_26340.9354_Insider_Preview_Feature_Update_Dev_amd64:
     runs-on: windows-latest
 
     steps:
